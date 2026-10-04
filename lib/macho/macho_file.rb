@@ -30,6 +30,11 @@ module MachO
     # @note load commands are provided in order of ascending offset.
     attr_reader :load_commands
 
+    # @return [Integer] the file offset of this Mach-O's header within the
+    #  underlying data buffer. This is zero for standalone Mach-Os and
+    #  non-zero for read-only views into a container (see {#fileset_entry}).
+    attr_reader :view_offset
+
     # Creates a new instance from a binary string.
     # @param bin [String] a binary string containing raw Mach-O data
     # @param opts [Hash] options to control the parser with
@@ -42,6 +47,24 @@ module MachO
     def self.new_from_bin(bin, **opts)
       instance = allocate
       instance.initialize_from_bin(bin, opts)
+
+      instance
+    end
+
+    # Creates a new instance viewing the Mach-O located at `offset` (relative
+    # to `parent`'s header) within the parent's data.
+    #
+    # The parent's data buffer is shared, not copied, and the resulting view
+    # is read-only: serialization and all modifying methods raise
+    # {MachOError}.
+    # @param parent [MachOFile] the container whose data backs the view
+    # @param offset [Integer] the offset of the Mach-O's header, relative to
+    #  the parent's header
+    # @param opts [Hash] options to control the parser with
+    # @return [MachOFile] a new MachOFile viewing the parent's data
+    def self.new_from_view(parent, offset, **opts)
+      instance = allocate
+      instance.initialize_from_view(parent, offset, opts)
 
       instance
     end
@@ -60,6 +83,7 @@ module MachO
 
       @filename = filename
       @options = opts
+      @view_offset = 0
       File.open(@filename, "rb") do |file|
         @raw_data = file.read(Headers::MachHeader.bytesize)
         @raw_data ||= ""
@@ -75,14 +99,39 @@ module MachO
     def initialize_from_bin(bin, opts)
       @filename = nil
       @options = opts
+      @view_offset = 0
       @raw_data = bin
+      populate_fields
+    end
+
+    # Initializes a new MachOFile instance viewing another MachOFile's data.
+    # @see MachO::MachOFile.new_from_view
+    # @api private
+    def initialize_from_view(parent, offset, opts)
+      @filename = nil
+      @options = opts
+      @view_parent = parent
+      @raw_data = parent.raw_data
+      @view_offset = parent.view_offset + offset
       populate_fields
     end
 
     # The file's raw Mach-O data.
     # @return [String] the raw Mach-O data
+    # @raise [MachOError] if the instance is a read-only view into a container
     def serialize
+      raise MachOError, "cannot serialize a read-only view into a container" if view?
+
       @raw_data
+    end
+
+    # Whether this Mach-O is a read-only view into a container's data, such
+    # as a fileset entry obtained via {#fileset_entry}. Views share their
+    # container's data buffer instead of copying it, so serialization and
+    # all modifying methods raise {MachOError}.
+    # @return [Boolean] whether this Mach-O is a view into a container
+    def view?
+      !@view_parent.nil?
     end
 
     # @!method magic
@@ -121,8 +170,8 @@ module MachO
     #  @return (see MachO::Headers::MachHeader#alignment)
     def_delegators :header, :magic, :ncmds, :sizeofcmds, :flags, :object?,
                    :executable?, :fvmlib?, :core?, :preload?, :dylib?,
-                   :dylinker?, :bundle?, :dsym?, :kext?, :magic32?, :magic64?,
-                   :alignment
+                   :dylinker?, :bundle?, :dsym?, :kext?, :fileset?, :magic32?,
+                   :magic64?, :alignment
 
     # @return [String] a string representation of the file's magic number
     def magic_string
@@ -165,9 +214,12 @@ module MachO
     #  the instance fields
     # @raise [OffsetInsertionError] if the offset is not in the load command region
     # @raise [HeaderPadError] if the new command exceeds the header pad buffer
+    # @raise [MachOError] if the instance is a read-only view into a container
     # @note Calling this method with an arbitrary offset in the load command region
     # **will leave the object in an inconsistent state**.
     def insert_command(offset, lc, options = {})
+      raise MachOError, "cannot modify a read-only view into a container" if view?
+
       context = LoadCommands::LoadCommand::SerializationContext.context_for(self)
       cmd_raw = lc.serialize(context)
       fileoff = offset + cmd_raw.bytesize
@@ -227,11 +279,14 @@ module MachO
     # @option options [Boolean] :repopulate (true) whether or not to repopulate
     #  the instance fields
     # @return [void]
+    # @raise [MachOError] if the instance is a read-only view into a container
     # @note This is public, but methods like {#delete_rpath} should be preferred.
     #  Setting `repopulate` to false **will leave the instance in an
     #  inconsistent state** unless {#populate_fields} is called **immediately**
     #  afterwards.
     def delete_command(lc, options = {})
+      raise MachOError, "cannot modify a read-only view into a container" if view?
+
       @raw_data.slice!(lc.view.offset, lc.cmdsize)
 
       # update Mach-O header fields to account for deleted load command
@@ -271,6 +326,56 @@ module MachO
       else
         command(:LC_SEGMENT_64)
       end
+    end
+
+    # All fileset entries declared by this Mach-O's `LC_FILESET_ENTRY` load
+    # commands, keyed by entry ID.
+    #
+    # Offset conventions for fileset containers (`MH_FILESET`):
+    #
+    # * The *header offset* of an entry is the file offset of the entry's own
+    #   Mach-O header within the container's data. It is declared by the
+    #   entry's `LC_FILESET_ENTRY` command (`fileoff`) and exposed on the
+    #   entry's {MachOFile} as {#view_offset}.
+    # * *File offsets* recorded in an entry's own load commands and sections
+    #   are relative to the entry's header, exactly as if the entry were a
+    #   standalone Mach-O. To obtain a container-absolute file offset, add
+    #   the entry's {#view_offset}. Offsets exposed through {MachOView} (for
+    #   example, load command views) are already container-absolute, since
+    #   the entry shares the container's data buffer.
+    # * *VM addresses* are taken as recorded: `LC_FILESET_ENTRY`'s `vmaddr`
+    #   is the address at which the entry is mapped in the fileset's shared
+    #   address space, and the entry's own segment and section addresses are
+    #   used as-is. No relocation is applied by this library.
+    #
+    # @return [Hash{String => LoadCommands::FilesetEntryCommand}] the fileset
+    #  entries, keyed by entry ID
+    # @raise [DuplicateFilesetEntryError] if two entries share an entry ID
+    # @raise [FilesetEntryBoundsError] if an entry lies outside the file
+    # @raise [FilesetEntryOverlapError] if an entry points into a Mach-O header
+    def fileset_entries
+      @fileset_entries ||= populate_fileset_entries
+    end
+
+    # The Mach-O for the fileset entry with the given entry ID.
+    #
+    # The returned {MachOFile} is a read-only view that shares this
+    # container's data buffer (see {#new_from_view}); the container is never
+    # copied. All load command and section queries work as on a standalone
+    # Mach-O. See {#fileset_entries} for the offset conventions.
+    # @param entry_id [String] the entry ID declared by an `LC_FILESET_ENTRY`
+    #  load command
+    # @return [MachOFile] the entry's Mach-O
+    # @raise [FilesetEntryUnknownError] if no entry has the given ID
+    # @raise [DuplicateFilesetEntryError] if two entries share an entry ID
+    # @raise [FilesetEntryBoundsError] if the entry lies outside the file
+    # @raise [FilesetEntryOverlapError] if the entry points into a Mach-O header
+    def fileset_entry(entry_id)
+      entry_id = entry_id.to_s
+      cmd = fileset_entries[entry_id]
+      raise FilesetEntryUnknownError, entry_id if cmd.nil?
+
+      MachOFile.new_from_view(self, cmd.fileoff, **options)
     end
 
     # The segment alignment for the Mach-O. Guesses conservatively.
@@ -448,18 +553,20 @@ module MachO
     # Write all Mach-O data to the given filename.
     # @param filename [String] the file to write to
     # @return [void]
+    # @raise [MachOError] if the instance is a read-only view into a container
     def write(filename)
-      File.binwrite(filename, @raw_data)
+      File.binwrite(filename, serialize)
     end
 
     # Write all Mach-O data to the file used to initialize the instance.
     # @return [void]
     # @raise [MachOError] if the instance was initialized without a file
+    # @raise [MachOError] if the instance is a read-only view into a container
     # @note Overwrites all data in the file!
     def write!
       raise MachOError, "no initial file to write to" if @filename.nil?
 
-      File.binwrite(@filename, @raw_data)
+      File.binwrite(@filename, serialize)
     end
 
     # @return [Hash] a hash representation of this {MachOFile}
@@ -469,6 +576,13 @@ module MachO
         "load_commands" => load_commands.map(&:to_h),
       }
     end
+
+    protected
+
+    # The raw data backing this Mach-O, possibly shared with a container.
+    # @return [String] the raw Mach-O data
+    # @api private
+    attr_reader :raw_data
 
     private
 
@@ -481,6 +595,7 @@ module MachO
       @dylib_load_commands = nil
       @load_commands_by_type = nil
       @segment_alignment = nil
+      @fileset_entries = nil
     end
 
     # The file's Mach-O header structure.
@@ -490,14 +605,14 @@ module MachO
     # @api private
     def populate_mach_header
       # the smallest Mach-O header is 28 bytes
-      raise TruncatedFileError if @raw_data.size < 28
+      raise TruncatedFileError if @raw_data.size - @view_offset < 28
 
-      magic = @raw_data[0..3].unpack1("N")
+      magic = @raw_data[@view_offset, 4].unpack1("N")
       populate_prelinked_kernel_header if Utils.compressed_magic?(magic)
 
       magic = populate_and_check_magic
       mh_klass = Utils.magic32?(magic) ? Headers::MachHeader : Headers::MachHeader64
-      mh = mh_klass.new_from_bin(endianness, @raw_data[0, mh_klass.bytesize])
+      mh = mh_klass.new_from_bin(endianness, @raw_data[@view_offset, mh_klass.bytesize])
 
       check_cputype(mh.cputype)
       check_cpusubtype(mh.cputype, mh.cpusubtype)
@@ -515,7 +630,7 @@ module MachO
     def populate_prelinked_kernel_header
       raise CompressedMachOError unless options.fetch(:decompress, false)
 
-      @plh = Headers::PrelinkedKernelHeader.new_from_bin :big, @raw_data[0, Headers::PrelinkedKernelHeader.bytesize]
+      @plh = Headers::PrelinkedKernelHeader.new_from_bin :big, @raw_data[@view_offset, Headers::PrelinkedKernelHeader.bytesize]
 
       raise DecompressionError, "unsupported compression type: LZSS" if @plh.lzss?
       raise DecompressionError, "unknown compression type: 0x#{plh.compress_type.to_s 16}" unless @plh.lzvn?
@@ -539,7 +654,10 @@ module MachO
       # From this point onwards, the internal buffer of this MachOFile refers to the decompressed
       # contents specified by the prelinked kernel header.
       begin
-        @raw_data = LZFSE.lzvn_decompress @raw_data.slice(Headers::PrelinkedKernelHeader.bytesize, @plh.compressed_size)
+        @raw_data = LZFSE.lzvn_decompress @raw_data.slice(@view_offset + Headers::PrelinkedKernelHeader.bytesize, @plh.compressed_size)
+        # the decompressed buffer is standalone, so it is no longer a view
+        @view_offset = 0
+        @view_parent = nil
         # Sanity checks.
         raise DecompressionError if @raw_data.size != @plh.uncompressed_size
         # TODO: check the adler32 CRC in @plh
@@ -554,7 +672,7 @@ module MachO
     # @raise [FatBinaryError] if the magic is for a Fat file
     # @api private
     def populate_and_check_magic
-      magic = @raw_data[0..3].unpack1("N")
+      magic = @raw_data[@view_offset, 4].unpack1("N")
 
       raise MagicError, magic unless Utils.magic?(magic)
       raise FatBinaryError if Utils.fat_magic?(magic)
@@ -597,7 +715,7 @@ module MachO
     # @api private
     def populate_load_commands
       permissive = options.fetch(:permissive, false)
-      offset = header.class.bytesize
+      offset = @view_offset + header.class.bytesize
       load_commands_end = offset + sizeofcmds
       raise TruncatedFileError if load_commands_end > @raw_data.bytesize
 
@@ -635,6 +753,58 @@ module MachO
       end
 
       load_commands
+    end
+
+    # All fileset entries declared by this Mach-O, keyed by entry ID.
+    # @return [Hash{String => LoadCommands::FilesetEntryCommand}] the entries
+    # @raise [DuplicateFilesetEntryError] if two entries share an entry ID
+    # @raise [FilesetEntryBoundsError] if an entry lies outside the file
+    # @raise [FilesetEntryOverlapError] if an entry points into a Mach-O header
+    # @api private
+    def populate_fileset_entries
+      entries = {}
+
+      command(:LC_FILESET_ENTRY).each do |cmd|
+        entry_id = cmd.entry_id.to_s
+        raise DuplicateFilesetEntryError, entry_id if entries.key?(entry_id)
+
+        check_fileset_entry_bounds(cmd)
+        entries.each_value do |other|
+          check_fileset_entry_overlap(cmd, other)
+        end
+
+        entries[entry_id] = cmd
+      end
+
+      entries
+    end
+
+    # Check that a fileset entry's file offset neither points into this
+    # container's own header and load command region nor outside the file.
+    # @param cmd [LoadCommands::FilesetEntryCommand] the entry to check
+    # @raise [FilesetEntryBoundsError] if the entry lies outside the file
+    # @raise [FilesetEntryOverlapError] if the entry points into the
+    #  container's header region
+    # @api private
+    def check_fileset_entry_bounds(cmd)
+      fileoff = @view_offset + cmd.fileoff
+      header_end = @view_offset + header.class.bytesize + sizeofcmds
+
+      raise FilesetEntryOverlapError.new(cmd.entry_id.to_s, cmd.fileoff) if fileoff >= @view_offset && fileoff < header_end
+      raise FilesetEntryBoundsError.new(cmd.entry_id.to_s, cmd.fileoff) if fileoff + Headers::MachHeader.bytesize > @raw_data.bytesize
+    end
+
+    # Check that a fileset entry's file offset does not point into another
+    # entry's Mach-O header.
+    # @param cmd [LoadCommands::FilesetEntryCommand] the entry to check
+    # @param other [LoadCommands::FilesetEntryCommand] a previously seen entry
+    # @raise [FilesetEntryOverlapError] if the entry points into the other
+    #  entry's header
+    # @api private
+    def check_fileset_entry_overlap(cmd, other)
+      other_header = other.fileoff...(other.fileoff + Headers::MachHeader64.bytesize)
+
+      raise FilesetEntryOverlapError.new(cmd.entry_id.to_s, cmd.fileoff) if other_header.cover?(cmd.fileoff)
     end
 
     # Calculate the segment alignment for the Mach-O. Guesses conservatively.

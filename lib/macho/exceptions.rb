@@ -256,4 +256,44 @@ module MachO
   # dependencies, or on other decompression errors.
   class DecompressionError < MachOError
   end
+
+  # Raised when a fileset (`MH_FILESET`) Mach-O or one of its entries is
+  # malformed.
+  class FilesetError < MachOError
+  end
+
+  # Raised when two fileset entries share the same entry ID.
+  class DuplicateFilesetEntryError < FilesetError
+    # @param entry_id [String] the duplicated entry ID
+    def initialize(entry_id)
+      super("Duplicate fileset entry ID: #{entry_id}")
+    end
+  end
+
+  # Raised when no fileset entry matches a requested entry ID.
+  class FilesetEntryUnknownError < FilesetError
+    # @param entry_id [String] the unknown entry ID
+    def initialize(entry_id)
+      super("No fileset entry with ID: #{entry_id}")
+    end
+  end
+
+  # Raised when a fileset entry's file offset lies outside the file.
+  class FilesetEntryBoundsError < FilesetError
+    # @param entry_id [String] the offending entry's ID
+    # @param fileoff [Integer] the offending entry's file offset
+    def initialize(entry_id, fileoff)
+      super("Fileset entry #{entry_id} at file offset 0x%<fileoff>x is out of bounds" % { :fileoff => fileoff })
+    end
+  end
+
+  # Raised when a fileset entry's file offset points into a Mach-O header
+  # (either the container's own header region or another entry's header).
+  class FilesetEntryOverlapError < FilesetError
+    # @param entry_id [String] the offending entry's ID
+    # @param fileoff [Integer] the offending entry's file offset
+    def initialize(entry_id, fileoff)
+      super("Fileset entry #{entry_id} at file offset 0x%<fileoff>x overlaps a Mach-O header" % { :fileoff => fileoff })
+    end
+  end
 end
