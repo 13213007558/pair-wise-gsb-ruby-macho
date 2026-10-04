@@ -10,6 +10,7 @@ require_relative "macho/sections"
 require_relative "macho/macho_file"
 require_relative "macho/fat_file"
 require_relative "macho/exceptions"
+require_relative "macho/dylib_graph"
 require_relative "macho/tools"
 
 # The primary namespace for ruby-macho.
