@@ -92,6 +92,11 @@ module MachO
     end
   end
 
+  # Raised when a fileset entry (LC_FILESET_ENTRY) is invalid or inconsistent
+  # with the containing MH_FILESET Mach-O.
+  class FilesetEntryError < MachOError
+  end
+
   # Raised when the CPU type is unknown.
   class CPUTypeError < MachOError
     # @param cputype [Integer] the unknown CPU type

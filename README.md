@@ -56,6 +56,40 @@ the required ad-hoc signature in Ruby instead of invoking `/usr/bin/codesign`:
 MachO.codesign!("/path/to/my/binary")
 ```
 
+### Filesets (MH_FILESET)
+
+`MH_FILESET` files (such as kernel collections) bundle several Mach-O
+sub-images into one container. Each sub-image is described by an
+`LC_FILESET_ENTRY` load command and can be accessed by its entry ID:
+
+```ruby
+file = MachO::MachOFile.new("/path/to/BootKernelExtensions.kc")
+file.fileset? # => true
+
+# all sub-images, keyed by entry ID:
+file.fileset_entries # => { "com.apple.driver.AppleSSE" => #<MachO::MachOFile>, ... }
+
+# a single sub-image; load command and section queries work as usual:
+kext = file.fileset_entry("com.apple.driver.AppleSSE")
+kext.load_commands.each { |lc| puts lc.type }
+kext.segments.first.sections
+```
+
+Sub-images share the container's raw data instead of copying it, and are
+read-only. Offsets in a fileset follow these conventions:
+
+* **Header offset** (`MachOFile#header_offset`): the byte offset of a Mach-O
+  header within the shared data. It is 0 for standalone files and containers,
+  and equals the entry's `LC_FILESET_ENTRY` `fileoff` for sub-images.
+* **File offsets**: segment `fileoff`s, section `offset`s and all other file
+  offsets stored in a sub-image's load commands are relative to the
+  *beginning of the container*, not to the sub-image's header, so they index
+  directly into the shared data.
+* **VM addresses**: a sub-image's segments map VM addresses to file offsets
+  exactly as in a standalone Mach-O: `file_offset = addr - segment.vmaddr +
+  segment.fileoff`, yielding a container-relative file offset. The entry's
+  `LC_FILESET_ENTRY` `vmaddr` is the VM address of the sub-image's header.
+
 
 ### What works?
 

@@ -30,6 +30,13 @@ module MachO
     # @note load commands are provided in order of ascending offset.
     attr_reader :load_commands
 
+    # @return [Integer] the offset of this Mach-O's header within the raw
+    #  data. This is 0 for standalone files, and the entry's file offset
+    #  ({LoadCommands::FilesetEntryCommand#fileoff}) for sub-images of an
+    #  +MH_FILESET+ container, which share the container's raw data.
+    # @see #fileset_entry?
+    attr_reader :header_offset
+
     # Creates a new instance from a binary string.
     # @param bin [String] a binary string containing raw Mach-O data
     # @param opts [Hash] options to control the parser with
@@ -60,6 +67,7 @@ module MachO
 
       @filename = filename
       @options = opts
+      @header_offset = 0
       File.open(@filename, "rb") do |file|
         @raw_data = file.read(Headers::MachHeader.bytesize)
         @raw_data ||= ""
@@ -76,10 +84,40 @@ module MachO
       @filename = nil
       @options = opts
       @raw_data = bin
+      @header_offset = 0
       populate_fields
     end
 
-    # The file's raw Mach-O data.
+    # Creates a new instance that shares another Mach-O's raw data, with its
+    # header located at the given offset within that data. No copy of the
+    # shared data is made.
+    # @param raw_data [String] the shared raw Mach-O data
+    # @param header_offset [Integer] the offset of this Mach-O's header
+    #  within +raw_data+
+    # @param opts [Hash] options to control the parser with
+    # @return [MachOFile] a new MachOFile
+    # @api private
+    def self.new_from_shared_data(raw_data, header_offset, **opts)
+      instance = allocate
+      instance.initialize_from_shared_data(raw_data, header_offset, opts)
+
+      instance
+    end
+
+    # Initializes a new MachOFile instance from shared raw data with the
+    # given options.
+    # @see MachO::MachOFile.new_from_shared_data
+    # @api private
+    def initialize_from_shared_data(raw_data, header_offset, opts)
+      @filename = nil
+      @options = opts
+      @raw_data = raw_data
+      @header_offset = header_offset
+      populate_fields
+    end
+
+    # The file's raw Mach-O data. For a fileset sub-image, this is the
+    # container's shared raw data, not a copy (see {#fileset_entry?}).
     # @return [String] the raw Mach-O data
     def serialize
       @raw_data
@@ -113,6 +151,8 @@ module MachO
     #  @return (see MachO::Headers::MachHeader#dsym?)
     # @!method kext?
     #  @return (see MachO::Headers::MachHeader#kext?)
+    # @!method fileset?
+    #  @return (see MachO::Headers::MachHeader#fileset?)
     # @!method magic32?
     #  @return (see MachO::Headers::MachHeader#magic32?)
     # @!method magic64?
@@ -122,7 +162,7 @@ module MachO
     def_delegators :header, :magic, :ncmds, :sizeofcmds, :flags, :object?,
                    :executable?, :fvmlib?, :core?, :preload?, :dylib?,
                    :dylinker?, :bundle?, :dsym?, :kext?, :magic32?, :magic64?,
-                   :alignment
+                   :fileset?, :alignment
 
     # @return [String] a string representation of the file's magic number
     def magic_string
@@ -157,6 +197,55 @@ module MachO
 
     alias [] command
 
+    # Whether this Mach-O is a sub-image of an +MH_FILESET+ container,
+    # sharing the container's raw data instead of owning a copy. Sub-images
+    # are read-only: modify the container instead.
+    # @return [Boolean] true if this Mach-O is a fileset sub-image
+    def fileset_entry?
+      @header_offset.positive?
+    end
+
+    # All fileset entries (sub-images) in this Mach-O, keyed by entry ID.
+    #
+    # Each sub-image is a {MachOFile} that shares this (container) file's raw
+    # data, so the container is never copied. Sub-images support the usual
+    # load command and section queries, but are read-only.
+    #
+    # Offsets in a fileset follow these conventions:
+    # * *Header offset*: {#header_offset} is the byte offset of a Mach-O
+    #   header within the shared data. It is 0 for the container and equals
+    #   +LC_FILESET_ENTRY+'s +fileoff+ for each sub-image.
+    # * *File offsets*: segment +fileoff+s, section +offset+s and all other
+    #   file offsets stored in a sub-image's load commands are relative to
+    #   the beginning of the *container*, not to the sub-image's header, so
+    #   they index directly into the shared data.
+    # * *VM addresses*: a sub-image's segments map VM addresses to file
+    #   offsets exactly as in a standalone Mach-O:
+    #   +file_offset = addr - segment.vmaddr + segment.fileoff+, yielding a
+    #   container-relative file offset. +LC_FILESET_ENTRY+'s +vmaddr+ is the
+    #   VM address of the sub-image's header.
+    #
+    # @example
+    #  kc = MachO::MachOFile.new("BootKernelExtensions.kc")
+    #  kc.fileset_entries["com.apple.driver.AppleSSE"].segments
+    # @return [Hash{String => MachOFile}] the fileset's sub-images, keyed by
+    #  entry ID. Empty if the Mach-O has no +LC_FILESET_ENTRY+ commands.
+    # @raise [FilesetEntryError] if an entry is out of bounds, points into
+    #  another entry's header, or duplicates another entry's ID
+    def fileset_entries
+      @fileset_entries ||= populate_fileset_entries
+      @fileset_entries.dup
+    end
+
+    # The fileset entry (sub-image) with the given entry ID.
+    # @param entry_id [String] the entry's ID
+    #  ({LoadCommands::FilesetEntryCommand#entry_id})
+    # @return [MachOFile, nil] the sub-image, or nil if there is no such entry
+    # @see #fileset_entries
+    def fileset_entry(entry_id)
+      fileset_entries[entry_id.to_s]
+    end
+
     # Inserts a load command at the given offset.
     # @param offset [Integer] the offset to insert at
     # @param lc [LoadCommands::LoadCommand] the load command to insert
@@ -168,6 +257,8 @@ module MachO
     # @note Calling this method with an arbitrary offset in the load command region
     # **will leave the object in an inconsistent state**.
     def insert_command(offset, lc, options = {})
+      raise ModificationError, "cannot modify a fileset sub-image" if fileset_entry?
+
       context = LoadCommands::LoadCommand::SerializationContext.context_for(self)
       cmd_raw = lc.serialize(context)
       fileoff = offset + cmd_raw.bytesize
@@ -232,6 +323,8 @@ module MachO
     #  inconsistent state** unless {#populate_fields} is called **immediately**
     #  afterwards.
     def delete_command(lc, options = {})
+      raise ModificationError, "cannot modify a fileset sub-image" if fileset_entry?
+
       @raw_data.slice!(lc.view.offset, lc.cmdsize)
 
       # update Mach-O header fields to account for deleted load command
@@ -442,6 +535,8 @@ module MachO
     # @param identifier [String, nil] the signing identifier
     # @return [void]
     def codesign!(identifier: nil)
+      raise ModificationError, "cannot modify a fileset sub-image" if fileset_entry?
+
       CodeSigning::AdhocSigner.new(self, identifier || CodeSigning.identifier(self, filename)).sign!
     end
 
@@ -481,6 +576,7 @@ module MachO
       @dylib_load_commands = nil
       @load_commands_by_type = nil
       @segment_alignment = nil
+      @fileset_entries = nil
     end
 
     # The file's Mach-O header structure.
@@ -490,14 +586,14 @@ module MachO
     # @api private
     def populate_mach_header
       # the smallest Mach-O header is 28 bytes
-      raise TruncatedFileError if @raw_data.size < 28
+      raise TruncatedFileError if @raw_data.size - @header_offset < 28
 
-      magic = @raw_data[0..3].unpack1("N")
+      magic = @raw_data[@header_offset, 4].unpack1("N")
       populate_prelinked_kernel_header if Utils.compressed_magic?(magic)
 
       magic = populate_and_check_magic
       mh_klass = Utils.magic32?(magic) ? Headers::MachHeader : Headers::MachHeader64
-      mh = mh_klass.new_from_bin(endianness, @raw_data[0, mh_klass.bytesize])
+      mh = mh_klass.new_from_bin(endianness, @raw_data[@header_offset, mh_klass.bytesize])
 
       check_cputype(mh.cputype)
       check_cpusubtype(mh.cputype, mh.cpusubtype)
@@ -515,7 +611,7 @@ module MachO
     def populate_prelinked_kernel_header
       raise CompressedMachOError unless options.fetch(:decompress, false)
 
-      @plh = Headers::PrelinkedKernelHeader.new_from_bin :big, @raw_data[0, Headers::PrelinkedKernelHeader.bytesize]
+      @plh = Headers::PrelinkedKernelHeader.new_from_bin :big, @raw_data[@header_offset, Headers::PrelinkedKernelHeader.bytesize]
 
       raise DecompressionError, "unsupported compression type: LZSS" if @plh.lzss?
       raise DecompressionError, "unknown compression type: 0x#{plh.compress_type.to_s 16}" unless @plh.lzvn?
@@ -539,7 +635,8 @@ module MachO
       # From this point onwards, the internal buffer of this MachOFile refers to the decompressed
       # contents specified by the prelinked kernel header.
       begin
-        @raw_data = LZFSE.lzvn_decompress @raw_data.slice(Headers::PrelinkedKernelHeader.bytesize, @plh.compressed_size)
+        @raw_data = LZFSE.lzvn_decompress @raw_data.slice(@header_offset + Headers::PrelinkedKernelHeader.bytesize, @plh.compressed_size)
+        @header_offset = 0
         # Sanity checks.
         raise DecompressionError if @raw_data.size != @plh.uncompressed_size
         # TODO: check the adler32 CRC in @plh
@@ -554,7 +651,7 @@ module MachO
     # @raise [FatBinaryError] if the magic is for a Fat file
     # @api private
     def populate_and_check_magic
-      magic = @raw_data[0..3].unpack1("N")
+      magic = @raw_data[@header_offset, 4].unpack1("N")
 
       raise MagicError, magic unless Utils.magic?(magic)
       raise FatBinaryError if Utils.fat_magic?(magic)
@@ -597,7 +694,7 @@ module MachO
     # @api private
     def populate_load_commands
       permissive = options.fetch(:permissive, false)
-      offset = header.class.bytesize
+      offset = @header_offset + header.class.bytesize
       load_commands_end = offset + sizeofcmds
       raise TruncatedFileError if load_commands_end > @raw_data.bytesize
 
@@ -635,6 +732,51 @@ module MachO
       end
 
       load_commands
+    end
+
+    # All fileset entries in the file, keyed by entry ID.
+    # @return [Hash{String => MachOFile}] the fileset's sub-images by entry ID
+    # @raise [FilesetEntryError] if an entry is out of bounds, points into
+    #  another entry's header, or duplicates another entry's ID
+    # @api private
+    def populate_fileset_entries
+      entries = {}
+      entry_commands = command(:LC_FILESET_ENTRY)
+      return entries if entry_commands.empty?
+
+      # Header regions that no entry may point into: the container's own
+      # header and load commands, then each validated entry's.
+      header_regions = [(0...(header.class.bytesize + sizeofcmds))]
+
+      entry_commands.sort_by(&:fileoff).each do |cmd|
+        entry_id = cmd.entry_id.to_s
+        raise FilesetEntryError, "duplicate fileset entry ID: #{entry_id}" if entries.key?(entry_id)
+
+        entry_offset = cmd.fileoff
+        if entry_offset + Headers::MachHeader.bytesize > @raw_data.bytesize
+          raise FilesetEntryError, "fileset entry #{entry_id} is out of bounds: " \
+                                   "header offset 0x#{entry_offset.to_s(16)}, " \
+                                   "file size 0x#{@raw_data.bytesize.to_s(16)}"
+        end
+
+        if (region = header_regions.find { |r| r.cover?(entry_offset) })
+          raise FilesetEntryError, "fileset entry #{entry_id} header offset " \
+                                   "0x#{entry_offset.to_s(16)} falls within another " \
+                                   "header region: 0x#{region.begin.to_s(16)}..0x#{region.end.to_s(16)}"
+        end
+
+        sub_image = begin
+          MachOFile.new_from_shared_data(@raw_data, entry_offset, **options)
+        rescue MachOError => e
+          raise FilesetEntryError, "invalid fileset entry #{entry_id} at header offset " \
+                                   "0x#{entry_offset.to_s(16)}: #{e.message}"
+        end
+
+        header_regions << (entry_offset...(entry_offset + sub_image.header.class.bytesize + sub_image.sizeofcmds))
+        entries[entry_id] = sub_image
+      end
+
+      entries
     end
 
     # Calculate the segment alignment for the Mach-O. Guesses conservatively.
@@ -693,7 +835,7 @@ module MachO
     def update_ncmds(ncmds)
       fmt = Utils.specialize_format("L=", endianness)
       ncmds_raw = [ncmds].pack(fmt)
-      @raw_data[16..19] = ncmds_raw
+      @raw_data[@header_offset + 16, 4] = ncmds_raw
     end
 
     # Updates the size of all load commands in the raw data.
@@ -703,7 +845,7 @@ module MachO
     def update_sizeofcmds(size)
       fmt = Utils.specialize_format("L=", endianness)
       size_raw = [size].pack(fmt)
-      @raw_data[20..23] = size_raw
+      @raw_data[@header_offset + 20, 4] = size_raw
     end
   end
 end

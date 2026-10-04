@@ -1510,6 +1510,7 @@ module MachO
     # A load command containing a description of a Mach-O that is a constituent of a fileset.
     # Each entry is further described by its own Mach header.
     # Corresponds to LC_FILESET_ENTRY.
+    # @see MachO::MachOFile#fileset_entries
     class FilesetEntryCommand < LoadCommand
       # @return [Integer] the virtual memory address of the entry
       field :vmaddr, :uint64
