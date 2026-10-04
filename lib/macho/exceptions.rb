@@ -204,6 +204,24 @@ module MachO
     end
   end
 
+  # Raised when a required dependent dylib cannot be found in the paths tried.
+  class DylibNotFoundError < MachOError
+    # @return [String] the dylib's install name
+    attr_reader :install_name
+
+    # @return [Array<String>] the virtual paths that were tried
+    attr_reader :tried_paths
+
+    # @param install_name [String] the dylib's install name
+    # @param tried_paths [Array<String>] the virtual paths that were tried
+    def initialize(install_name, tried_paths)
+      @install_name = install_name
+      @tried_paths = tried_paths
+
+      super("dylib #{install_name} not found; tried: #{tried_paths.join(", ")}")
+    end
+  end
+
   # Raised when attempting to change an rpath that doesn't exist.
   class RpathUnknownError < RecoverableModificationError
     # @param path [String] the unknown runtime path

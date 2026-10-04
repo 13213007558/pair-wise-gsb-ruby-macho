@@ -56,6 +56,26 @@ the required ad-hoc signature in Ruby instead of invoking `/usr/bin/codesign`:
 MachO.codesign!("/path/to/my/binary")
 ```
 
+### Virtual dependency graphs
+
+`MachO.dependency_graph` resolves a Mach-O's dynamic-library graph using data
+supplied by a callback. It never opens paths itself, so it can inspect archives,
+package manifests, or other virtual file trees. It understands
+`@executable_path`, `@loader_path`, and `@rpath`, follows
+`LC_LOAD_DYLIB`, `LC_LOAD_WEAK_DYLIB`, and `LC_REEXPORT_DYLIB`, and selects
+compatible slices from fat files. Missing weak libraries remain optional edges;
+a missing required library raises `MachO::DylibNotFoundError` with the tried
+paths.
+
+```ruby
+graph = MachO.dependency_graph("/bin/program", arch: :arm64) do |path|
+  package.read_file(path)
+end
+
+graph.edges.each do |edge|
+  puts [edge.source, edge.target, edge.load_command].inspect
+end
+```
 
 ### What works?
 
@@ -64,6 +84,7 @@ MachO.codesign!("/path/to/my/binary")
 * Changing install names in Mach-O and Fat files
 * Adding, deleting, and modifying rpaths.
 * Parsing embedded code signatures and applying ad-hoc signatures in pure Ruby.
+* Building read-only virtual dylib dependency graphs.
 
 ### Contributing
 

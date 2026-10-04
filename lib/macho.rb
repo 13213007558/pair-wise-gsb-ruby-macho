@@ -9,6 +9,7 @@ require_relative "macho/load_commands"
 require_relative "macho/sections"
 require_relative "macho/macho_file"
 require_relative "macho/fat_file"
+require_relative "macho/dependency_graph"
 require_relative "macho/exceptions"
 require_relative "macho/tools"
 
@@ -56,5 +57,11 @@ module MachO
     nil
   rescue MachOError => e
     raise CodeSigningError, "#{filename}: signing failed: #{e.message}"
+  end
+
+  # Builds the dynamic-library dependency graph rooted at a virtual Mach-O.
+  # @see DependencyGraph.build
+  def self.dependency_graph(executable_path, *args, **options, &block)
+    DependencyGraph.build(executable_path, *args, **options, &block)
   end
 end
