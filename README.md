@@ -56,6 +56,29 @@ the required ad-hoc signature in Ruby instead of invoking `/usr/bin/codesign`:
 MachO.codesign!("/path/to/my/binary")
 ```
 
+### Offline symbol binding
+
+`MachO::BindResolver` resolves symbol references against an in-memory set of
+images, following dyld's two-level namespace rules: the reference's library
+ordinal selects the expected defining dylib, re-exported dependents are
+traced transparently, and a name is never matched across every library unless
+a flat lookup is explicitly requested. Weak imports, the main-executable
+ordinal, and circular re-exports are reported as structured results. The
+resolver never touches the filesystem; callers supply the image set:
+
+```ruby
+resolver = MachO::BindResolver.new([
+  MachO::BindResolver::Image.new("app", :executable => true,
+                                 :dependents => ["libfoo.dylib"]),
+  MachO::BindResolver::Image.new("libfoo.dylib", :exports => ["_run"]),
+])
+
+resolver.bind(:from => "app", :ordinal => 1, :symbol => "_run")
+# => #<MachO::BindResolver::Bound ...> bound to libfoo.dylib
+```
+
+See `examples/bind_resolver_demo.rb` for a walkthrough of duplicate exports,
+indirect re-exports, weak undefined symbols, and circular re-exports.
 
 ### What works?
 
