@@ -63,6 +63,7 @@ MachO.codesign!("/path/to/my/binary")
 * Changing the IDs of Mach-O and Fat dylibs
 * Changing install names in Mach-O and Fat files
 * Adding, deleting, and modifying rpaths.
+* Reading, querying, modifying, and re-serializing dyld export tries.
 * Parsing embedded code signatures and applying ad-hoc signatures in pure Ruby.
 
 ### Contributing

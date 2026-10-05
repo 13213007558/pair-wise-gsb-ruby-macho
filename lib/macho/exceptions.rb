@@ -162,6 +162,14 @@ module MachO
     end
   end
 
+  # Raised when export trie data is malformed.
+  class ExportTrieError < MachOError
+  end
+
+  # Raised when an export symbol is invalid or already exists.
+  class ExportSymbolError < ExportTrieError
+  end
+
   # Raised when a load command string is malformed in some way.
   class LCStrMalformedError < MachOError
     # @param lc [MachO::LoadCommand] the load command containing the string

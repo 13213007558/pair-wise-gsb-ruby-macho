@@ -262,6 +262,26 @@ module MachO
       @dylib_load_commands.dup
     end
 
+    # The export trie used by the dynamic linker.
+    # @return [ExportTrie] the parsed export trie
+    # @return [nil] if the Mach-O contains no export information
+    def export_trie
+      @export_trie ||= begin
+        command = self[:LC_DYLD_EXPORTS_TRIE].first || self[:LC_DYLD_INFO_ONLY].first || self[:LC_DYLD_INFO].first
+        return if command.nil?
+
+        data_offset, data_size = export_trie_location(command)
+        data = @raw_data.byteslice(data_offset, data_size)
+        return ExportTrie.new if data_size.zero?
+
+        if data.nil? || data.bytesize != data_size
+          raise ExportTrieError, "export trie extends beyond the Mach-O at offset #{data_offset}"
+        end
+
+        ExportTrie.new(data)
+      end
+    end
+
     # All segment load commands in the Mach-O.
     # @return [Array<LoadCommands::SegmentCommand>] if the Mach-O is 32-bit
     # @return [Array<LoadCommands::SegmentCommand64>] if the Mach-O is 64-bit
@@ -472,6 +492,20 @@ module MachO
 
     private
 
+    # Returns the file offset and size of a load command's export trie.
+    # @return [Array<Integer>] the export trie's offset and size
+    # @api private
+    def export_trie_location(command)
+      case command.type
+      when :LC_DYLD_EXPORTS_TRIE
+        [command.dataoff, command.datasize]
+      when :LC_DYLD_INFO, :LC_DYLD_INFO_ONLY
+        [command.export_off, command.export_size]
+      else
+        raise ExportTrieError, "#{command.type} does not contain an export trie"
+      end
+    end
+
     # Clears all memoized values. Called when the file is repopulated.
     # @return [void]
     # @api private
@@ -481,6 +515,7 @@ module MachO
       @dylib_load_commands = nil
       @load_commands_by_type = nil
       @segment_alignment = nil
+      @export_trie = nil
     end
 
     # The file's Mach-O header structure.

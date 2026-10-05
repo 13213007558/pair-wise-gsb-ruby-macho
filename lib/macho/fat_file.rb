@@ -173,6 +173,12 @@ module MachO
       machos.flat_map(&:dylib_load_commands)
     end
 
+    # The export tries from all of the file's Mach-O slices.
+    # @return [Array<ExportTrie>] one export trie per slice
+    def export_tries
+      machos.map(&:export_trie)
+    end
+
     # Changes the file's dylib ID to `new_id`. If the file is not a dylib,
     #  does nothing.
     # @example
