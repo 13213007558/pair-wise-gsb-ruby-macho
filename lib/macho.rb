@@ -57,4 +57,12 @@ module MachO
   rescue MachOError => e
     raise CodeSigningError, "#{filename}: signing failed: #{e.message}"
   end
+
+  # Verifies embedded CodeDirectory hashes without checking certificate trust.
+  # @param filename [String] the file being opened
+  # @param special_data [#call, Hash, nil] data for external special slots
+  # @return [CodeSigning::VerificationResult]
+  def self.verify_code_signature(filename, special_data = nil, &block)
+    open(filename).verify_code_signature(special_data, &block)
+  end
 end

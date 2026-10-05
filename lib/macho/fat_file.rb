@@ -298,6 +298,18 @@ module MachO
       nil
     end
 
+    # Verifies embedded CodeDirectory hashes for every Mach-O slice.
+    # @param special_data [#call, Hash, nil] data for external special slots
+    # @return [CodeSigning::VerificationResult]
+    # @note This checks content digests only; it does not evaluate certificate trust.
+    def verify_code_signature(special_data = nil, &block)
+      CodeSigning::VerificationResult.combine(
+        machos.each_with_index.map do |macho, slice|
+          CodeSigning.verify(macho, special_data, :slice => slice, &block)
+        end
+      )
+    end
+
     # Extract a Mach-O with the given CPU type from the file.
     # @example
     #  file.extract(:i386) # => MachO::MachOFile

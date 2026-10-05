@@ -273,7 +273,293 @@ class MachOCodeSigningTest < Minitest::Test
     end
   end
 
+  def test_verifies_an_adhoc_signature_without_evaluating_trust
+    signed_hello do |macho|
+      result = macho.verify_code_signature
+
+      assert_predicate result, :valid?
+      assert_predicate result, :digests_consistent?
+      assert_predicate result, :complete?
+      assert_predicate result, :all_bytes_covered?
+      assert_predicate result, :adhoc?
+      refute_predicate result, :trusted_signer?
+      assert_equal :not_evaluated, result.signer_trust
+      assert_equal [
+        MachO::CodeSigning::CSSLOT_CODEDIRECTORY,
+        MachO::CodeSigning::CSSLOT_ALTERNATE_CODEDIRECTORIES,
+      ], result.code_directories.map(&:slot)
+      assert_equal [], result.issues
+    end
+  end
+
+  def test_verifies_every_slice_of_a_fat_signature
+    tempfile_with_data("hello", File.binread(fixture(%i[i386 x86_64], "hello.bin"))) do |file|
+      MachO.codesign!(file.path)
+
+      result = MachO.open(file.path).verify_code_signature
+
+      assert_predicate result, :valid?
+      assert_predicate result, :all_bytes_covered?
+      assert_equal 2, result.slices.size
+      refute_empty result.slices.first.code_directories
+      refute_empty result.slices.last.code_directories
+      assert_equal :not_evaluated, result.signer_trust
+    end
+  end
+
+  def test_reports_matching_code_byte_changes_for_every_code_directory
+    signed_hello do |macho, command|
+      macho.serialize.setbyte(3904, macho.serialize.getbyte(3904) ^ 0xff)
+
+      result = macho.verify_code_signature
+
+      refute_predicate result, :valid?
+      refute_predicate result, :digests_consistent?
+      assert_predicate result, :complete?
+      assert_equal :inconsistent, result.status
+      assert_equal 2, result.issues.size
+      assert_equal [:code_hash_mismatch, :code_hash_mismatch], result.issues.map(&:code)
+      assert_equal [0, 0], result.issues.map(&:offset)
+      assert_equal [4096, 4096], result.issues.map(&:length)
+    end
+  end
+
+  def test_reports_a_mismatch_in_the_final_partial_page
+    signed_hello do |macho, command|
+      offset = command.dataoff - 2
+      macho.serialize.setbyte(offset, macho.serialize.getbyte(offset) ^ 0xff)
+
+      result = macho.verify_code_signature
+
+      assert_equal :inconsistent, result.status
+      assert_equal 2, result.issues.size
+      assert(result.issues.all? { |issue| issue.slot == 2 })
+      assert_equal [8192, 8192], result.issues.map(&:offset)
+      assert_equal [240, 240], result.issues.map(&:length)
+    end
+  end
+
+  def test_verifies_external_info_plist_special_slot_data
+    plist = "original-plist!"
+    signed_hello_with_info_plist(plist) do |macho|
+      assert_predicate macho.verify_code_signature(1 => plist), :valid?
+
+      changed = macho.verify_code_signature(1 => "changed-plist!!!")
+
+      refute_predicate changed, :valid?
+      refute_empty changed.issues.select { |issue| issue.code == :special_slot_hash_mismatch }
+      assert_equal :inconsistent, changed.status
+    end
+  end
+
+  def test_provides_the_code_directory_to_external_special_slot_callbacks
+    plist = "original-plist!"
+    signed_hello_with_info_plist(plist) do |macho|
+      callback_slots = []
+      result = macho.verify_code_signature do |slot, code_directory|
+        callback_slots << [slot, code_directory.hash_type_sym]
+        plist
+      end
+
+      assert_predicate result, :valid?
+      assert_equal [
+        [MachO::CodeSigning::CSSLOT_INFOSLOT, :CS_HASHTYPE_SHA1],
+        [MachO::CodeSigning::CSSLOT_INFOSLOT, :CS_HASHTYPE_SHA256],
+      ], callback_slots
+    end
+  end
+
+  def test_reports_missing_external_special_slot_data_as_unverifiable
+    plist = "original-plist!"
+    signed_hello_with_info_plist(plist) do |macho|
+      result = macho.verify_code_signature
+
+      refute_predicate result, :valid?
+      refute_predicate result, :complete?
+      assert_predicate result, :digests_consistent?
+      assert_equal :unverifiable, result.status
+      refute_empty result.issues.select { |issue| issue.code == :missing_special_slot_data }
+    end
+  end
+
+  def test_reports_unsigned_trailing_data_separately_from_a_mismatch
+    signed_hello do |macho, command|
+      macho.serialize << "unsigned tail"
+
+      result = macho.verify_code_signature
+
+      assert_predicate result, :digests_consistent?
+      assert_predicate result, :complete?
+      assert_predicate result, :valid?
+      refute_predicate result, :all_bytes_covered?
+      assert_equal [:unsigned_trailing_data], result.issues.map(&:code)
+      assert_equal command.dataoff + command.datasize, result.issues.first.offset
+      assert_equal "unsigned tail".bytesize, result.issues.first.length
+    end
+  end
+
+  def test_uses_scatter_vector_mappings_for_code_hashes
+    signed_scatter_hello do |macho|
+      result = macho.verify_code_signature
+
+      assert_predicate result, :valid?
+      assert_equal 1, result.code_directories.size
+      assert result.code_directories.first.scatter
+
+      macho.serialize.setbyte(4096, macho.serialize.getbyte(4096) ^ 0xff)
+      changed = macho.verify_code_signature
+
+      assert_equal :inconsistent, changed.status
+      issue = changed.issues.find { |candidate| candidate.code == :scatter_hash_mismatch }
+      refute_nil issue
+      assert_equal 1, issue.message[/slot (\d+)/, 1].to_i
+      assert_equal 4096, issue.offset
+      assert_equal 4096, issue.length
+    end
+  end
+
+  def test_distinguishes_scatter_overlaps_from_hash_mismatches
+    signed_scatter_hello(:entries => [[2, 0, 8192], [1, 1, 4096]]) do |macho|
+      result = macho.verify_code_signature
+
+      assert_equal :malformed, result.status
+      assert_includes result.issues.map(&:code), :scatter_hash_slots_overlap
+    end
+
+    signed_scatter_hello(:entries => [[1, 0, 0], [1, 1, 1024], [1, 2, 4096]]) do |macho|
+      result = macho.verify_code_signature
+
+      assert_equal :malformed, result.status
+      assert_includes result.issues.map(&:code), :scatter_targets_overlap
+    end
+  end
+
+  def test_reports_missing_scatter_target_data
+    signed_scatter_hello(:entries => [[1, 0, 9072], [1, 1, 0], [1, 2, 4096]]) do |macho|
+      result = macho.verify_code_signature
+
+      assert_equal :unverifiable, result.status
+      assert_includes result.issues.map(&:code), :missing_code_data
+    end
+  end
+
+  def test_reports_unsupported_code_directory_hash_algorithms
+    signed_hello do |macho, command|
+      code_directory = unsupported_code_directory(macho.serialize.byteslice(0, command.dataoff))
+      requirements = command.superblob.blob(MachO::CodeSigning::CSSLOT_REQUIREMENTS).serialize
+      superblob = MachO::CodeSigning::SuperBlob.build(
+        MachO::CodeSigning::CSSLOT_CODEDIRECTORY => code_directory,
+        MachO::CodeSigning::CSSLOT_REQUIREMENTS => requirements,
+        MachO::CodeSigning::CSSLOT_SIGNATURESLOT => [MachO::CodeSigning::CSMAGIC_BLOBWRAPPER, 8].pack("N2")
+      )
+      replace_signature(macho, superblob)
+
+      result = macho.verify_code_signature
+
+      assert_equal :unverifiable, result.status
+      assert_equal [:unsupported_hash_type], result.code_directories.flat_map(&:issues).map(&:code)
+      refute_predicate result, :trusted_signer?
+    end
+  end
+
   private
+
+  def signed_hello
+    tempfile_with_data("hello", File.binread(fixture(:x86_64, "hello.bin"))) do |file|
+      MachO.codesign!(file.path)
+      macho = MachO.open(file.path)
+      yield macho, macho[:LC_CODE_SIGNATURE].first
+    end
+  end
+
+  def signed_hello_with_info_plist(plist)
+    bin = File.binread(fixture(:x86_64, "hello.bin"))
+    macho = MachO::MachOFile.new_from_bin(bin)
+    section = macho.segments.flat_map(&:sections).find { |candidate| candidate.sectname == "__cstring" }
+    section_index = bin.index("__cstring\x00".b)
+    bin[section_index, 16] = "__info_plist".ljust(16, "\x00")
+    bin[section.offset, section.size] = plist
+
+    tempfile_with_data("hello", bin) do |file|
+      MachO.codesign!(file.path)
+      yield MachO.open(file.path)
+    end
+  end
+
+  def signed_scatter_hello(entries: nil)
+    entries ||= [
+      [1, 0, 8192],
+      [1, 2, 0],
+      [1, 1, 4096],
+    ]
+    signed_hello do |macho, command|
+      replace_with_scatter_signature(macho, command, entries)
+      yield macho
+    end
+  end
+
+  def replace_with_scatter_signature(macho, command, entries)
+    source = macho.serialize.byteslice(0, command.dataoff)
+    requirements = command.superblob.blob(MachO::CodeSigning::CSSLOT_REQUIREMENTS).serialize
+    code_directory = MachO::CodeSigning::CodeDirectory.build(
+      source,
+      :identifier => "scatter",
+      :hash_type => MachO::CodeSigning::CS_HASHTYPE_SHA256,
+      :flags => MachO::CodeSigning::CS_ADHOC,
+      :special_slots => { MachO::CodeSigning::CSSLOT_REQUIREMENTS => requirements },
+      :exec_seg_base => 0,
+      :exec_seg_limit => 4096,
+      :exec_seg_flags => 0,
+      :runtime => 0
+    )
+    mappings = {}
+    entries.uniq { |_, base, _| base }.each do |count, base, target_offset|
+      count.times do |index|
+        target = target_offset + (index * 4096)
+        length = target < source.bytesize ? [4096, source.bytesize - target].min : 0
+        mappings[base + index] = source.byteslice(target, length) unless length.zero?
+      end
+    end
+    mappings.each do |slot, chunk|
+      code_directory[code_directory.unpack1("N", :offset => 16) + (slot * 32), 32] = Digest::SHA256.digest(chunk)
+    end
+    scatter_offset = code_directory.bytesize
+    entries.each do |count, base, target_offset|
+      code_directory << [count, base, target_offset, 0].pack("N2Q>2")
+    end
+    code_directory << [0, 0, 0, 0].pack("N2Q>2")
+    code_directory[4, 4] = [code_directory.bytesize].pack("N")
+    code_directory[44, 4] = [scatter_offset].pack("N")
+
+    superblob = MachO::CodeSigning::SuperBlob.build(
+      MachO::CodeSigning::CSSLOT_CODEDIRECTORY => code_directory,
+      MachO::CodeSigning::CSSLOT_REQUIREMENTS => requirements,
+      MachO::CodeSigning::CSSLOT_SIGNATURESLOT => [MachO::CodeSigning::CSMAGIC_BLOBWRAPPER, 8].pack("N2")
+    )
+    replace_signature(macho, superblob)
+  end
+
+  def unsupported_code_directory(source)
+    code_directory = MachO::CodeSigning::CodeDirectory.build(
+      source,
+      :identifier => "unsupported",
+      :hash_type => MachO::CodeSigning::CS_HASHTYPE_SHA256,
+      :flags => MachO::CodeSigning::CS_ADHOC,
+      :special_slots => {},
+      :exec_seg_base => 0,
+      :exec_seg_limit => 0,
+      :exec_seg_flags => 0,
+      :runtime => 0
+    )
+    code_directory.setbyte(37, 99)
+    code_directory
+  end
+
+  def replace_signature(macho, superblob)
+    command = macho[:LC_CODE_SIGNATURE].first
+    assert_operator superblob.bytesize, :<=, command.datasize
+    macho.serialize[command.dataoff, command.datasize] = superblob.ljust(command.datasize, "\x00")
+  end
 
   def entitlement_blob
     payload = "<?xml version=\"1.0\"?><plist><dict/></plist>"

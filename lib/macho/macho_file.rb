@@ -445,6 +445,14 @@ module MachO
       CodeSigning::AdhocSigner.new(self, identifier || CodeSigning.identifier(self, filename)).sign!
     end
 
+    # Verifies that embedded CodeDirectory hashes match the current bytes.
+    # @param special_data [#call, Hash, nil] data for external special slots
+    # @return [CodeSigning::VerificationResult]
+    # @note This checks content digests only; it does not evaluate certificate trust.
+    def verify_code_signature(special_data = nil, &block)
+      CodeSigning.verify(self, special_data, &block)
+    end
+
     # Write all Mach-O data to the given filename.
     # @param filename [String] the file to write to
     # @return [void]

@@ -56,6 +56,33 @@ the required ad-hoc signature in Ruby instead of invoking `/usr/bin/codesign`:
 MachO.codesign!("/path/to/my/binary")
 ```
 
+### Verifying embedded signatures
+
+Use `verify_code_signature` to check that the bytes still match the digests in a
+read-only embedded CodeDirectory:
+
+```ruby
+result = MachO.verify_code_signature("/path/to/my/binary")
+result.valid?                    # all requested digest checks could run and matched
+result.digests_consistent?      # no digest mismatch, even if some data was unavailable
+result.all_bytes_covered?       # false when unsigned gaps or trailing bytes exist
+result.signer_trust             # always :not_evaluated
+result.trusted_signer?          # always false
+```
+
+Special-slot data that is not carried inside the signature blob, such as
+Info.plist, must be supplied by the caller:
+
+```ruby
+result = MachO.verify_code_signature("/path/to/my/binary") do |slot, code_directory|
+  File.binread("Contents/Info.plist") if slot == MachO::CodeSigning::CSSLOT_INFOSLOT
+end
+```
+
+Missing external data, unsupported digest algorithms, malformed scatter vectors,
+and hash mismatches are returned as separate issue codes with offsets or slots.
+This API does not validate certificates or the signer's trust chain.
+
 
 ### What works?
 
@@ -63,7 +90,7 @@ MachO.codesign!("/path/to/my/binary")
 * Changing the IDs of Mach-O and Fat dylibs
 * Changing install names in Mach-O and Fat files
 * Adding, deleting, and modifying rpaths.
-* Parsing embedded code signatures and applying ad-hoc signatures in pure Ruby.
+* Parsing and verifying embedded code signatures and applying ad-hoc signatures in pure Ruby.
 
 ### Contributing
 
