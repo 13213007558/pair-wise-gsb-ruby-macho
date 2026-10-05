@@ -43,6 +43,11 @@ end
 # access a specific load command
 lc_vers = file[:LC_VERSION_MIN_MACOSX].first
 puts lc_vers.version_string # => "10.10.0"
+
+# inspect offline chained fixups without applying or signing them
+file.chained_fixups&.fixups&.each do |fixup|
+  puts [fixup.kind, fixup.address, fixup.target_address, fixup.import&.name].inspect
+end
 ```
 
 ### Ad-hoc code signing
@@ -64,6 +69,7 @@ MachO.codesign!("/path/to/my/binary")
 * Changing install names in Mach-O and Fat files
 * Adding, deleting, and modifying rpaths.
 * Parsing embedded code signatures and applying ad-hoc signatures in pure Ruby.
+* Inspecting `LC_DYLD_CHAINED_FIXUPS` rebases, binds, imports, addends, and arm64e signing metadata.
 
 ### Contributing
 

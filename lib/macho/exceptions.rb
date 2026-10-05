@@ -126,6 +126,11 @@ module MachO
     end
   end
 
+  # Raised when chained fixup data is malformed or references data outside
+  # of the containing Mach-O.
+  class ChainedFixupsError < MachOError
+  end
+
   # Raised when a load command has an invalid size.
   class LoadCommandSizeError < NotAMachOError
     # @param size [Integer] the invalid size

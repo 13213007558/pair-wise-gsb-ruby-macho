@@ -273,6 +273,17 @@ module MachO
       end
     end
 
+    # The file's offline chained fixups, if present.
+    # @return [ChainedFixups::Fixups, nil] the parsed chained fixups
+    # @raise [ChainedFixupsError] if the chained fixup data is malformed
+    # @see ChainedFixups::Fixups
+    def chained_fixups
+      @chained_fixups ||= begin
+        command = command(:LC_DYLD_CHAINED_FIXUPS).first
+        ChainedFixups::Parser.new(self, command).parse if command
+      end
+    end
+
     # The segment alignment for the Mach-O. Guesses conservatively.
     # @return [Integer] the alignment, as a power of 2
     # @note This is **not** the same as {#alignment}!
