@@ -256,4 +256,9 @@ module MachO
   # dependencies, or on other decompression errors.
   class DecompressionError < MachOError
   end
+
+  # Raised when a LC_DYLD_CHAINED_FIXUPS payload is malformed, truncated, or
+  # uses an unsupported format.
+  class ChainedFixupsError < MachOError
+  end
 end

@@ -273,6 +273,14 @@ module MachO
       end
     end
 
+    # The decoded chained fixups in this Mach-O.
+    # @return [Array<ChainedFixups::Rebase, ChainedFixups::Bind>] the fixups,
+    #  empty if there is no LC_DYLD_CHAINED_FIXUPS command
+    # @raise [ChainedFixupsError] if the payload is malformed or unsupported
+    def chained_fixups
+      ChainedFixups.parse(self)
+    end
+
     # The segment alignment for the Mach-O. Guesses conservatively.
     # @return [Integer] the alignment, as a power of 2
     # @note This is **not** the same as {#alignment}!
