@@ -7,6 +7,7 @@ require_relative "macho/headers"
 require_relative "macho/code_signing"
 require_relative "macho/load_commands"
 require_relative "macho/sections"
+require_relative "macho/export_trie"
 require_relative "macho/macho_file"
 require_relative "macho/fat_file"
 require_relative "macho/exceptions"
@@ -56,5 +57,14 @@ module MachO
     nil
   rescue MachOError => e
     raise CodeSigningError, "#{filename}: signing failed: #{e.message}"
+  end
+
+  # Queries symbols exported by a thin Mach-O binary.
+  # @param bin [String] raw Mach-O binary data
+  # @param prefix [String] the symbol-name prefix to query
+  # @return [Array<ExportTrie::Export>] matching exported symbols
+  # @raise [ExportTrieError] if the export trie is malformed
+  def self.exported_symbols(bin, prefix = "")
+    MachOFile.new_from_bin(bin).exported_symbols(prefix)
   end
 end

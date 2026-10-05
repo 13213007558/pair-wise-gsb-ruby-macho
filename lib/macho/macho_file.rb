@@ -361,6 +361,30 @@ module MachO
       @rpaths.dup
     end
 
+    # Exports declared in the dyld export trie.
+    # @param prefix [String] a symbol-name prefix used to prune the trie walk
+    # @return [Array<ExportTrie::Export>] matching exported symbols
+    # @raise [ExportTrieError] if the referenced export trie is malformed
+    # @note LC_DYLD_EXPORTS_TRIE is preferred over the export area in
+    #   LC_DYLD_INFO(_ONLY).
+    def exported_symbols(prefix = "")
+      source = export_trie_source
+      return [] if source.nil?
+
+      offset = source[:file_offset]
+      size = source[:size]
+      unless offset.is_a?(Integer) && size.is_a?(Integer) && offset >= 0 && size >= 0 &&
+             offset <= @raw_data.bytesize && offset + size <= @raw_data.bytesize
+        raise ExportTrieError, "#{source[:type]} references an export trie outside the binary"
+      end
+
+      trie = @raw_data.byteslice(offset, size)
+      return [] if trie.empty?
+
+      dylib_names = export_dylib_names
+      ExportTrie.query(trie, prefix, :source => source, :dylib_names => dylib_names)
+    end
+
     # Changes the runtime path `old_path` to `new_path`
     # @example
     #  file.change_rpath("/usr/lib", "/usr/local/lib")
@@ -504,6 +528,40 @@ module MachO
       check_filetype(mh.filetype)
 
       mh
+    end
+
+    # @return [Hash, nil] the location and type of the export trie
+    # @api private
+    def export_trie_source
+      command = self[:LC_DYLD_EXPORTS_TRIE].first
+
+      if command
+        return nil if command.datasize.zero?
+
+        return {
+          :type => "LC_DYLD_EXPORTS_TRIE",
+          :file_offset => command.dataoff,
+          :size => command.datasize,
+        }
+      end
+
+      command = self[:LC_DYLD_INFO_ONLY].first || self[:LC_DYLD_INFO].first
+      return nil if command.nil? || command.export_size.zero?
+
+      {
+        :type => command.type.to_s,
+        :file_offset => command.export_off,
+        :size => command.export_size,
+      }
+    end
+
+    # @return [Array<String>] dylib names indexed by Mach-O library ordinals
+    # @api private
+    def export_dylib_names
+      load_commands.select { |lc| LoadCommands::DYLIB_LOAD_COMMANDS.include?(lc.type) }
+                   .map { |lc| lc.name.to_s }
+    rescue LCStrMalformedError => e
+      raise ExportTrieError, e.message
     end
 
     # Read a compressed Mach-O header and check its validity, as well as whether we're able

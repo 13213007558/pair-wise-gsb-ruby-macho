@@ -256,4 +256,8 @@ module MachO
   # dependencies, or on other decompression errors.
   class DecompressionError < MachOError
   end
+
+  # Raised when a dyld export trie is truncated or malformed.
+  class ExportTrieError < MachOError
+  end
 end
