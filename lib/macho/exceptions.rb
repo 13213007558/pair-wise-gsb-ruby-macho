@@ -14,6 +14,10 @@ module MachO
   class CodeSigningError < MachOError
   end
 
+  # Raised when offline Objective-C 2.0 metadata browsing cannot proceed.
+  class ObjC2Error < MachOError
+  end
+
   # Raised when a Mach-O file modification fails but can be recovered when
   # operating on multiple Mach-O slices of a fat binary in non-strict mode.
   class RecoverableModificationError < ModificationError

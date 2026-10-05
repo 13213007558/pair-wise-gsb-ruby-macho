@@ -56,6 +56,27 @@ the required ad-hoc signature in Ruby instead of invoking `/usr/bin/codesign`:
 MachO.codesign!("/path/to/my/binary")
 ```
 
+### Offline Objective-C metadata browsing
+
+`MachO::ObjC2.browse` reads the objc2 metadata sections of an unencrypted
+64-bit Mach-O fixed image and returns a serializable relation graph of
+classes, metaclasses, categories, protocols and methods (including both
+normal and relative method lists). The Objective-C runtime is never loaded;
+every pointer is resolved through a caller-provided mapper, so the image is
+treated as pure data:
+
+```ruby
+graph = MachO::ObjC2.browse(MachO::MachOFile.new("MyFramework"))
+graph["classes"]     # => [{ "id" => "class:0x...", "name" => "Widget", ... }, ...]
+graph["methods"]     # => [{ "name" => "sharedMethod", "kind" => "instance",
+                     #         "source" => "category", ... }, ...]
+graph["diagnostics"] # unreadable pointers are reported here, not raised
+```
+
+For non-standard layouts, use `MachO::ObjC2.extract` with raw file bytes, a
+mapper (any callable mapping a vmaddr to a file offset or nil) and the
+locations of the __objc_classlist, __objc_catlist and __objc_protolist
+sections.
 
 ### What works?
 
