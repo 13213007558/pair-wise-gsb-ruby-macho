@@ -252,6 +252,11 @@ module MachO
   class CompressedMachOError < MachOError
   end
 
+  # Raised when a dyld info (LC_DYLD_INFO/LC_DYLD_INFO_ONLY) bytecode stream
+  # is malformed or references segments that do not exist.
+  class DyldInfoError < MachOError
+  end
+
   # Raised when attempting to decompress a compressed Mach-O without adequate
   # dependencies, or on other decompression errors.
   class DecompressionError < MachOError
