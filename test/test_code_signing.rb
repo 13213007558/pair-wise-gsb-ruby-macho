@@ -273,7 +273,276 @@ class MachOCodeSigningTest < Minitest::Test
     end
   end
 
+  def test_verifies_a_fresh_adhoc_signature
+    tempfile_with_data("hello", File.binread(fixture(:x86_64, "hello.bin"))) do |file|
+      MachO.codesign!(file.path)
+
+      report = MachO::CodeSigning.verify(MachO.open(file.path))
+
+      assert_predicate report, :valid?
+      assert_predicate report, :content_valid?
+      assert_equal :ok, report.status
+      assert_empty report.mismatches
+      assert_empty report.problems
+      refute_predicate report, :signer_trusted?
+      assert_equal :not_evaluated, report.trust_status
+      assert_predicate report, :adhoc?
+      assert_equal report.results.map(&:to_h), report.to_h["results"]
+    end
+  end
+
+  def test_detects_mutated_code_bytes
+    tempfile_with_data("hello", File.binread(fixture(:x86_64, "hello.bin"))) do |file|
+      MachO.codesign!(file.path)
+      data = File.binread(file.path)
+      dataoff = MachO::MachOFile.new_from_bin(data)[:LC_CODE_SIGNATURE].first.dataoff
+      first_mutation = dataoff / 2
+      last_mutation = dataoff - 1
+      data.setbyte(first_mutation, data.getbyte(first_mutation) ^ 0xff)
+      data.setbyte(last_mutation, data.getbyte(last_mutation) ^ 0xff)
+
+      report = MachO::CodeSigning.verify(data)
+
+      refute_predicate report, :valid?
+      assert_equal :mismatch, report.status
+      mismatches = report.mismatches.select { |mismatch| mismatch.kind == :code }
+      by_slot = mismatches.group_by(&:slot)
+      first_slot = first_mutation / 4096
+      last_slot = last_mutation / 4096
+      refute_equal first_slot, last_slot
+      assert_equal first_slot * 4096, by_slot.fetch(first_slot).first.offset
+      assert_equal 4096, by_slot.fetch(first_slot).first.length
+      last = by_slot.fetch(last_slot).first
+      assert_equal last_slot * 4096, last.offset
+      assert_equal dataoff - (last_slot * 4096), last.length
+      assert_operator last.length, :<, 4096
+    end
+  end
+
+  def test_ignores_data_appended_after_the_signature
+    tempfile_with_data("hello", File.binread(fixture(:x86_64, "hello.bin"))) do |file|
+      MachO.codesign!(file.path)
+      data = File.binread(file.path) + "appended unsigned data"
+
+      report = MachO::CodeSigning.verify(data)
+
+      assert_predicate report, :valid?
+      assert_empty report.mismatches
+    end
+  end
+
+  def test_verifies_special_slots_supplied_by_the_callback
+    tempfile_with_data("hello", File.binread(fixture(:x86_64, "hello.bin"))) do |file|
+      MachO.codesign!(file.path)
+      macho = MachO.open(file.path)
+      command = macho[:LC_CODE_SIGNATURE].first
+      source = macho.serialize.byteslice(0, command.dataoff)
+      plist = "<?xml version=\"1.0\"?><plist><dict><key>CFBundleIdentifier</key><string>test</string></dict></plist>"
+      code_directory = build_code_directory(
+        source, :special_slots => { MachO::CodeSigning::CSSLOT_INFOSLOT => plist }
+      )
+      data = splice_signature(macho, MachO::CodeSigning::CSSLOT_CODEDIRECTORY => code_directory)
+
+      # The Info.plist bytes are not carried inside the signature blob, so
+      # the slot cannot be checked without the callback.
+      report = MachO::CodeSigning.verify(data)
+      refute_predicate report, :valid?
+      assert_equal :unverifiable, report.status
+      problem = report.problems.find { |entry| entry.code == :missing_special_slot_data }
+      refute_nil problem
+      assert_equal MachO::CodeSigning::CSSLOT_INFOSLOT, problem.details[:slot]
+
+      report = MachO::CodeSigning.verify(data) do |slot|
+        slot == MachO::CodeSigning::CSSLOT_INFOSLOT ? plist : nil
+      end
+      assert_predicate report, :valid?
+
+      tampered = plist.sub("test", "evil")
+      report = MachO::CodeSigning.verify(
+        data, :special_slots => { MachO::CodeSigning::CSSLOT_INFOSLOT => tampered }
+      )
+      refute_predicate report, :valid?
+      mismatch = report.mismatches.find { |entry| entry.kind == :special }
+      assert_equal MachO::CodeSigning::CSSLOT_INFOSLOT, mismatch.slot
+      assert_nil mismatch.offset
+    end
+  end
+
+  def test_verifies_alternate_code_directories
+    tempfile_with_data("hello", File.binread(fixture(:x86_64, "hello.bin"))) do |file|
+      MachO.codesign!(file.path)
+      macho = MachO.open(file.path)
+      command = macho[:LC_CODE_SIGNATURE].first
+      source = macho.serialize.byteslice(0, command.dataoff)
+      requirements = [MachO::CodeSigning::CSMAGIC_REQUIREMENTS, 16, 0, "test"].pack("N3a4")
+      special_slots = { MachO::CodeSigning::CSSLOT_REQUIREMENTS => requirements }
+      primary = build_code_directory(source, :special_slots => special_slots)
+      alternate = build_code_directory(
+        source, :hash_type => MachO::CodeSigning::CS_HASHTYPE_SHA1, :special_slots => special_slots
+      )
+      data = splice_signature(
+        macho,
+        MachO::CodeSigning::CSSLOT_CODEDIRECTORY => primary,
+        MachO::CodeSigning::CSSLOT_ALTERNATE_CODEDIRECTORIES => alternate,
+        MachO::CodeSigning::CSSLOT_REQUIREMENTS => requirements
+      )
+
+      report = MachO::CodeSigning.verify(data)
+
+      assert_predicate report, :valid?
+      assert_equal [
+        MachO::CodeSigning::CSSLOT_CODEDIRECTORY,
+        MachO::CodeSigning::CSSLOT_ALTERNATE_CODEDIRECTORIES,
+      ], report.results.map(&:slot)
+
+      data.setbyte(command.dataoff / 2, data.getbyte(command.dataoff / 2) ^ 0xff)
+      report = MachO::CodeSigning.verify(data)
+
+      refute_predicate report, :valid?
+      assert_equal 2, report.results.count { |result| result.status == :mismatch }
+    end
+  end
+
+  def test_follows_the_scatter_vector
+    tempfile_with_data("hello", File.binread(fixture(:x86_64, "hello.bin"))) do |file|
+      MachO.codesign!(file.path)
+      macho = MachO.open(file.path)
+      command = macho[:LC_CODE_SIGNATURE].first
+      source = macho.serialize.byteslice(0, command.dataoff)
+      code_directory = build_code_directory(source)
+      parsed = MachO::CodeSigning::CodeDirectory.new(code_directory)
+      assert_operator parsed.n_code_slots, :>=, 2
+
+      # Swap the first two page hashes and describe the swap with a scatter
+      # vector: slot 0 covers page 1 and slot 1 covers page 0.
+      hash_size = parsed.hash_size
+      swapped = [parsed.code_hash(1), parsed.code_hash(0)].join
+      code_directory[parsed.hash_offset, hash_size * 2] = swapped
+      entries = [[1, 0, 4096], [1, 1, 0]]
+      entries << [parsed.n_code_slots - 2, 2, 8192] if parsed.n_code_slots > 2
+      scatter = entries.map { |entry| [*entry, 0].pack("N2Q>2") }.join
+      scatter << [0, 0, 0, 0].pack("N2Q>2")
+      code_directory[4, 4] = [code_directory.bytesize + scatter.bytesize].pack("N")
+      code_directory[44, 4] = [code_directory.bytesize].pack("N")
+      code_directory << scatter
+      data = splice_signature(macho, MachO::CodeSigning::CSSLOT_CODEDIRECTORY => code_directory)
+
+      report = MachO::CodeSigning.verify(data)
+
+      assert_predicate report, :valid?
+
+      data.setbyte(4096 + 16, data.getbyte(4096 + 16) ^ 0xff)
+      report = MachO::CodeSigning.verify(data)
+
+      refute_predicate report, :valid?
+      mismatch = report.mismatches.find { |entry| entry.kind == :code }
+      assert_equal 0, mismatch.slot
+      assert_equal 4096, mismatch.offset
+    end
+  end
+
+  def test_reports_overlapping_scatter_ranges
+    tempfile_with_data("hello", File.binread(fixture(:x86_64, "hello.bin"))) do |file|
+      MachO.codesign!(file.path)
+      macho = MachO.open(file.path)
+      command = macho[:LC_CODE_SIGNATURE].first
+      source = macho.serialize.byteslice(0, command.dataoff)
+      code_directory = build_code_directory(source)
+      parsed = MachO::CodeSigning::CodeDirectory.new(code_directory)
+      entries = [[1, 0, 0], [1, 1, 0]]
+      entries << [parsed.n_code_slots - 2, 2, 8192] if parsed.n_code_slots > 2
+      scatter = entries.map { |entry| [*entry, 0].pack("N2Q>2") }.join
+      scatter << [0, 0, 0, 0].pack("N2Q>2")
+      code_directory[4, 4] = [code_directory.bytesize + scatter.bytesize].pack("N")
+      code_directory[44, 4] = [code_directory.bytesize].pack("N")
+      code_directory << scatter
+      data = splice_signature(macho, MachO::CodeSigning::CSSLOT_CODEDIRECTORY => code_directory)
+
+      report = MachO::CodeSigning.verify(data)
+
+      refute_predicate report, :valid?
+      problem = report.problems.find { |entry| entry.code == :overlapping_ranges }
+      refute_nil problem
+    end
+  end
+
+  def test_reports_an_unsupported_hash_type
+    tempfile_with_data("hello", File.binread(fixture(:x86_64, "hello.bin"))) do |file|
+      MachO.codesign!(file.path)
+      macho = MachO.open(file.path)
+      command = macho[:LC_CODE_SIGNATURE].first
+      source = macho.serialize.byteslice(0, command.dataoff)
+      code_directory = build_code_directory(source)
+      code_directory.setbyte(37, 0x7f)
+      data = splice_signature(macho, MachO::CodeSigning::CSSLOT_CODEDIRECTORY => code_directory)
+
+      report = MachO::CodeSigning.verify(data)
+
+      refute_predicate report, :valid?
+      assert_equal :unverifiable, report.status
+      problem = report.problems.find { |entry| entry.code == :unsupported_hash_type }
+      refute_nil problem
+      assert_empty report.mismatches
+    end
+  end
+
+  def test_reports_missing_signed_data
+    tempfile_with_data("hello", File.binread(fixture(:x86_64, "hello.bin"))) do |file|
+      MachO.codesign!(file.path)
+      macho = MachO.open(file.path)
+      command = macho[:LC_CODE_SIGNATURE].first
+      source = macho.serialize.byteslice(0, command.dataoff)
+      code_directory = build_code_directory(source)
+      code_directory[32, 4] = [command.dataoff + 8192].pack("N")
+      data = splice_signature(macho, MachO::CodeSigning::CSSLOT_CODEDIRECTORY => code_directory)
+
+      report = MachO::CodeSigning.verify(data)
+
+      refute_predicate report, :valid?
+      problem = report.problems.find { |entry| entry.code == :missing_data }
+      refute_nil problem
+    end
+  end
+
+  def test_requires_a_signature_to_verify
+    macho = MachO.open(fixture(:x86_64, "hello.bin"))
+
+    assert_raises(MachO::CodeSigningError) do
+      MachO::CodeSigning.verify(macho)
+    end
+  end
+
   private
+
+  def build_code_directory(source, **overrides)
+    MachO::CodeSigning::CodeDirectory.build(
+      source,
+      **{
+        :identifier => "test",
+        :hash_type => MachO::CodeSigning::CS_HASHTYPE_SHA256,
+        :flags => MachO::CodeSigning::CS_ADHOC,
+        :special_slots => {},
+        :exec_seg_base => 0,
+        :exec_seg_limit => 0,
+        :exec_seg_flags => 0,
+        :runtime => 0,
+      }.merge(overrides)
+    )
+  end
+
+  def splice_signature(macho, entries)
+    command = macho[:LC_CODE_SIGNATURE].first
+    superblob = MachO::CodeSigning::SuperBlob.build(entries)
+    data = macho.serialize
+    if superblob.bytesize <= command.datasize
+      data[command.dataoff, command.datasize] = superblob.ljust(command.datasize, "\x00")
+    else
+      data[command.dataoff, command.datasize] = superblob
+      format = MachO::Utils.specialize_format("L=", macho.endianness)
+      data[command.view.offset + 8, 8] = [command.dataoff, superblob.bytesize].pack(format * 2)
+    end
+    data
+  end
 
   def entitlement_blob
     payload = "<?xml version=\"1.0\"?><plist><dict/></plist>"

@@ -56,6 +56,19 @@ the required ad-hoc signature in Ruby instead of invoking `/usr/bin/codesign`:
 MachO.codesign!("/path/to/my/binary")
 ```
 
+`MachO::CodeSigning.verify` checks, without modifying anything, whether the
+bytes of a signed Mach-O still match its embedded CodeDirectory hashes and
+reports the exact slots and file offsets of any mismatch. Special slots whose
+data is not carried inside the signature (such as Info.plist) can be supplied
+through a callback. Note that a valid report only means the content digests
+match; whether the signer is trusted by the system is never evaluated.
+
+```ruby
+report = MachO::CodeSigning.verify(MachO.open("/path/to/my/binary"))
+report.valid?           # => true (content digests match)
+report.signer_trusted?  # => false (trust is never evaluated)
+```
+
 
 ### What works?
 
@@ -63,7 +76,8 @@ MachO.codesign!("/path/to/my/binary")
 * Changing the IDs of Mach-O and Fat dylibs
 * Changing install names in Mach-O and Fat files
 * Adding, deleting, and modifying rpaths.
-* Parsing embedded code signatures and applying ad-hoc signatures in pure Ruby.
+* Parsing embedded code signatures, applying ad-hoc signatures in pure Ruby,
+  and verifying file bytes against embedded CodeDirectories.
 
 ### Contributing
 

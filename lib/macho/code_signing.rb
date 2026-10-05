@@ -63,11 +63,19 @@ module MachO
     CS_SUPPORTSLINKAGE = 0x20600
 
     PAGE_SIZE = 4096
+    SCATTER_ENTRY_SIZE = 24
     PRESERVED_COMPONENT_SLOTS = [
       CSSLOT_REQUIREMENTS,
       CSSLOT_ENTITLEMENTS,
       CSSLOT_DER_ENTITLEMENTS,
     ].freeze
+
+    CSSLOT_DESCRIPTIONS = {
+      CSSLOT_INFOSLOT => "Info.plist",
+      CSSLOT_REQUIREMENTS => "requirements",
+      CSSLOT_ENTITLEMENTS => "entitlements",
+      CSSLOT_DER_ENTITLEMENTS => "DER entitlements",
+    }.freeze
 
     HASHES = {
       CS_HASHTYPE_SHA1 => [Digest::SHA1, 20],
@@ -540,6 +548,410 @@ module MachO
         end
       end
     end
+
+    # The outcome of verifying a signed Mach-O against its embedded
+    # CodeDirectories. A valid report only means the content digests match;
+    # it says nothing about whether the signer is trusted by the system.
+    class VerificationReport
+      # @return [Array<CodeDirectoryVerification>] per-CodeDirectory results
+      attr_reader :results
+
+      # @param results [Array<CodeDirectoryVerification>]
+      def initialize(results)
+        @results = results.freeze
+      end
+
+      # @return [Symbol] :ok, :mismatch or :unverifiable
+      def status
+        return :mismatch if results.any? { |result| result.status == :mismatch }
+        return :unverifiable if results.any? { |result| result.status == :unverifiable }
+
+        :ok
+      end
+
+      # Whether every embedded CodeDirectory matches the file bytes.
+      # @return [Boolean]
+      def valid?
+        status == :ok
+      end
+      alias content_valid? valid?
+
+      # Whether the signer is trusted by the system. Certificate trust-chain
+      # verification is not performed, so this is always false; ad-hoc
+      # signatures have no identity to trust in the first place.
+      # @return [Boolean]
+      def signer_trusted?
+        false
+      end
+
+      # @return [Symbol] always :not_evaluated; no trust-chain verification is performed
+      def trust_status
+        :not_evaluated
+      end
+
+      # @return [Boolean] whether any CodeDirectory carries the ad-hoc flag
+      def adhoc?
+        results.any? { |result| result.flags.anybits?(CS_ADHOC) }
+      end
+
+      # @return [Array<CodeDirectoryVerification::Mismatch>] all digest mismatches
+      def mismatches
+        results.flat_map(&:mismatches)
+      end
+
+      # @return [Array<CodeDirectoryVerification::Problem>] all verification problems
+      def problems
+        results.flat_map(&:problems)
+      end
+
+      # @return [Hash] a hash representation of this report
+      def to_h
+        {
+          "status" => status,
+          "valid" => valid?,
+          "content_valid" => content_valid?,
+          "signer_trusted" => signer_trusted?,
+          "trust_status" => trust_status,
+          "adhoc" => adhoc?,
+          "results" => results.map(&:to_h),
+        }
+      end
+    end
+
+    # The outcome of verifying a single embedded CodeDirectory.
+    class CodeDirectoryVerification
+      # A file region or special slot whose digest differs from the CodeDirectory.
+      Mismatch = Struct.new(:kind, :slot, :offset, :length, :expected, :actual) do
+        # @return [Hash] a hash representation of this mismatch
+        def to_h
+          {
+            "kind" => kind,
+            "slot" => slot,
+            "offset" => offset,
+            "length" => length,
+            "expected" => expected.unpack1("H*"),
+            "actual" => actual.unpack1("H*"),
+          }
+        end
+      end
+
+      # A condition that prevents (complete) verification, reported with a
+      # distinct code: :unsupported_hash_type, :overlapping_ranges,
+      # :missing_data, :missing_special_slot_data or :invalid_scatter_vector.
+      Problem = Struct.new(:code, :message, :details) do
+        # @return [Hash] a hash representation of this problem
+        def to_h
+          {
+            "code" => code,
+            "message" => message,
+            "details" => details.transform_keys(&:to_s),
+          }
+        end
+      end
+
+      # @return [Integer] the SuperBlob slot of the CodeDirectory
+      attr_reader :slot
+
+      # @return [Integer] the CodeDirectory hash type
+      attr_reader :hash_type
+
+      # @return [Integer] the CodeDirectory flags
+      attr_reader :flags
+
+      # @return [Array<Mismatch>] digest mismatches found so far
+      attr_reader :mismatches
+
+      # @return [Array<Problem>] verification problems found so far
+      attr_reader :problems
+
+      # @param slot [Integer] the SuperBlob slot of the CodeDirectory
+      # @param hash_type [Integer] the CodeDirectory hash type
+      # @param flags [Integer] the CodeDirectory flags
+      def initialize(slot, hash_type, flags)
+        @slot = slot
+        @hash_type = hash_type
+        @flags = flags
+        @mismatches = []
+        @problems = []
+      end
+
+      # @return [Symbol] :ok, :mismatch or :unverifiable
+      def status
+        return :mismatch unless mismatches.empty?
+        return :unverifiable unless problems.empty?
+
+        :ok
+      end
+
+      # @return [Boolean] whether the CodeDirectory fully matches the file bytes
+      def valid?
+        status == :ok
+      end
+
+      # @return [Hash] a hash representation of this result
+      def to_h
+        {
+          "slot" => slot,
+          "hash_type" => hash_type,
+          "status" => status,
+          "mismatches" => mismatches.map(&:to_h),
+          "problems" => problems.map(&:to_h),
+        }
+      end
+    end
+
+    # Checks file bytes against the hashes embedded in a CodeDirectory.
+    # @api private
+    class Verifier
+      # @param data [String] the complete Mach-O bytes
+      # @param superblob [SuperBlob] the embedded signature
+      # @param provider [#call] callback returning external special-slot data
+      def initialize(data, superblob, provider)
+        @data = data
+        @superblob = superblob
+        @provider = provider
+      end
+
+      # Verifies the primary and every alternate CodeDirectory.
+      # @return [VerificationReport]
+      def verify
+        results = []
+        @superblob.indices.each_with_index do |index, position|
+          blob = @superblob.blobs[position]
+          next unless blob.is_a?(CodeDirectory)
+          next unless index.type == CSSLOT_CODEDIRECTORY ||
+                      (index.type >= CSSLOT_ALTERNATE_CODEDIRECTORIES && index.type < CSSLOT_SIGNATURESLOT)
+
+          results << verify_code_directory(blob, index.type)
+        end
+        raise CodeSigningError, "embedded signature contains no CodeDirectory" if results.empty?
+
+        VerificationReport.new(results)
+      end
+
+      private
+
+      def verify_code_directory(code_directory, slot)
+        result = CodeDirectoryVerification.new(slot, code_directory.hash_type, code_directory.flags)
+        hash_info = HASHES[code_directory.hash_type]
+        if hash_info.nil? || hash_info.last != code_directory.hash_size
+          result.problems << problem(
+            :unsupported_hash_type,
+            "unsupported CodeDirectory hash type #{code_directory.hash_type} " +              "(hash size #{code_directory.hash_size})",
+            :hash_type => code_directory.hash_type, :hash_size => code_directory.hash_size
+          )
+          return result
+        end
+
+        digest = hash_info.first
+        page_size = 1 << code_directory.page_size
+        code_limit = code_directory.code_limit
+        if code_limit > @data.bytesize
+          result.problems << problem(
+            :missing_data,
+            "signed range is #{code_limit} bytes but only #{@data.bytesize} bytes are available",
+            :code_limit => code_limit, :available => @data.bytesize
+          )
+        end
+
+        slots = page_map(code_directory, page_size, code_limit, result)
+        report_overlaps(slots, page_size, code_limit, result)
+        report_gaps(slots, page_size, code_limit, result)
+        verify_code_slots(code_directory, slots, page_size, code_limit, digest, result)
+        verify_special_slots(code_directory, digest, result)
+        result
+      end
+
+      # Maps code slots to file offsets, following the scatter vector when one
+      # is present instead of assuming contiguous pages.
+      def page_map(code_directory, page_size, code_limit, result)
+        if code_directory.scatter_offset.to_i.zero?
+          return (0...code_directory.n_code_slots).to_h { |slot| [slot, slot * page_size] }
+        end
+
+        map = {}
+        offset = code_directory.scatter_offset
+        blob = code_directory.serialize
+        loop do
+          if offset + SCATTER_ENTRY_SIZE > blob.bytesize
+            result.problems << problem(:missing_data, "scatter vector is truncated", :offset => offset)
+            break
+          end
+
+          count, base, target_offset, = blob.unpack("N2Q>2", :offset => offset)
+          break if count.zero?
+
+          count.times do |index|
+            slot = base + index
+            target = target_offset + (index * page_size)
+            if slot >= code_directory.n_code_slots || target >= code_limit
+              result.problems << problem(
+                :invalid_scatter_vector,
+                "scatter vector maps slot #{slot} to out-of-range target #{target}",
+                :slot => slot, :target => target
+              )
+              next
+            end
+            if map.key?(slot)
+              result.problems << problem(
+                :overlapping_ranges, "slot #{slot} is mapped more than once", :slot => slot
+              )
+              next
+            end
+            map[slot] = target
+          end
+          offset += SCATTER_ENTRY_SIZE
+        end
+        map
+      end
+
+      def report_overlaps(slots, page_size, code_limit, result)
+        ranges = slots.map do |slot, offset|
+          [offset, offset + chunk_length(offset, page_size, code_limit), slot]
+        end.sort
+        ranges.each_cons(2) do |(_, finish, slot), (start, _, other)|
+          next if start >= finish
+
+          result.problems << problem(
+            :overlapping_ranges,
+            "slots #{slot} and #{other} map overlapping file ranges",
+            :slot => slot, :other_slot => other, :offset => start
+          )
+        end
+      end
+
+      def report_gaps(slots, page_size, code_limit, result)
+        covered = 0
+        ranges = slots.map { |_, offset| [offset, offset + chunk_length(offset, page_size, code_limit)] }.sort
+        ranges.each do |start, finish|
+          next if finish <= covered
+
+          if start > covered
+            result.problems << problem(
+              :missing_data,
+              "signed range #{covered}...#{start} is not covered by any hash slot",
+              :offset => covered, :length => start - covered
+            )
+          end
+          covered = finish
+        end
+        return if covered >= code_limit
+
+        result.problems << problem(
+          :missing_data,
+          "signed range #{covered}...#{code_limit} is not covered by any hash slot",
+          :offset => covered, :length => code_limit - covered
+        )
+      end
+
+      def verify_code_slots(code_directory, slots, page_size, code_limit, digest, result)
+        slots.sort.each do |slot, offset|
+          expected = code_directory.code_hash(slot)
+          if expected.nil?
+            result.problems << problem(:invalid_scatter_vector, "slot #{slot} has no hash", :slot => slot)
+            next
+          end
+
+          length = chunk_length(offset, page_size, code_limit)
+          if offset + length > @data.bytesize
+            result.problems << problem(
+              :missing_data,
+              "slot #{slot} needs #{length} bytes at offset #{offset} but the data ends at #{@data.bytesize}",
+              :slot => slot, :offset => offset, :length => length
+            )
+            next
+          end
+
+          actual = digest.digest(@data.byteslice(offset, length))
+          next if actual == expected
+
+          result.mismatches << CodeDirectoryVerification::Mismatch.new(:code, slot, offset, length, expected, actual)
+        end
+      end
+
+      def verify_special_slots(code_directory, digest, result)
+        1.upto(code_directory.n_special_slots) do |slot|
+          expected = code_directory.special_hash(slot)
+          next if expected.nil?
+
+          content = @superblob.blob(slot)&.serialize
+          content ||= @provider.call(slot)
+          if content.nil?
+            # A zeroed hash slot means the component is intentionally absent.
+            next if expected.bytes.all?(&:zero?)
+
+            result.problems << problem(
+              :missing_special_slot_data,
+              "special slot #{slot}#{slot_description(slot)} is not part of the signature; " +                "pass its data to verify it",
+              :slot => slot
+            )
+            next
+          end
+
+          actual = digest.digest(content)
+          next if actual == expected
+
+          result.mismatches << CodeDirectoryVerification::Mismatch.new(:special, slot, nil, content.bytesize, expected, actual)
+        end
+      end
+
+      def chunk_length(offset, page_size, code_limit)
+        [page_size, code_limit - offset].min
+      end
+
+      def slot_description(slot)
+        CSSLOT_DESCRIPTIONS.key?(slot) ? " (#{CSSLOT_DESCRIPTIONS[slot]})" : ""
+      end
+
+      def problem(code, message, details)
+        CodeDirectoryVerification::Problem.new(code, message, details)
+      end
+    end
+
+    # Verifies that the bytes of a signed Mach-O still match its embedded
+    # CodeDirectory hashes. This is a read-only operation covering normal
+    # pages, the trailing partial page, special slots and alternate
+    # CodeDirectories.
+    #
+    # Special slots whose contents are not carried inside the signature blob
+    # (such as the Info.plist slot) can only be checked when their data is
+    # supplied through the special_slots keyword (a Hash keyed by slot number,
+    # or a callable receiving the slot number) or the block; otherwise they
+    # are reported as unverifiable.
+    #
+    # Note that a valid report only means the content digests match; whether
+    # the signer is trusted by the system is never evaluated.
+    #
+    # @param source [MachOFile, String] a Mach-O or its raw bytes
+    # @param special_slots [Hash<Integer, String>, #call, nil] external special-slot data
+    # @yield [slot] optional callback returning external special-slot data
+    # @return [VerificationReport]
+    # @raise [CodeSigningError] if the Mach-O is not signed
+    def self.verify(source, special_slots: nil, &block)
+      macho = case source
+      when MachOFile then source
+      when String then MachOFile.new_from_bin(source)
+      else raise ArgumentError, "cannot verify #{source.class}"
+      end
+      commands = macho[:LC_CODE_SIGNATURE]
+      raise CodeSigningError, "Mach-O is not signed" if commands.empty?
+      raise CodeSigningError, "Mach-O contains multiple LC_CODE_SIGNATURE commands" if commands.size > 1
+
+      Verifier.new(macho.serialize, commands.first.superblob, special_slot_provider(special_slots, block)).verify
+    end
+
+    # @api private
+    def self.special_slot_provider(special_slots, block)
+      sources = [special_slots, block].compact
+      lambda do |slot|
+        sources.each do |source|
+          data = source.respond_to?(:call) ? source.call(slot) : source[slot]
+          return data if data
+        end
+        nil
+      end
+    end
+    private_class_method :special_slot_provider
 
     # Derives the identifier used by Apple's ad-hoc signer for a bare Mach-O.
     # @param macho [MachOFile] a Mach-O slice
