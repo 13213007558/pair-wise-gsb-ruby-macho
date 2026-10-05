@@ -126,6 +126,11 @@ module MachO
     end
   end
 
+  # Raised when a compressed dyld info (LC_DYLD_INFO/LC_DYLD_INFO_ONLY)
+  # opcode stream is malformed or references out-of-range state.
+  class DyldInfoError < MachOError
+  end
+
   # Raised when a load command has an invalid size.
   class LoadCommandSizeError < NotAMachOError
     # @param size [Integer] the invalid size
