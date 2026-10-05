@@ -171,6 +171,10 @@ module MachO
     end
   end
 
+  # Raised when an LC_DYLD_INFO export trie or LC_DYLD_EXPORTS_TRIE is malformed.
+  class ExportTrieError < MachOError
+  end
+
   # Raised when a change at an offset is not valid.
   class OffsetInsertionError < ModificationError
     # @param offset [Integer] the invalid offset

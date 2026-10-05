@@ -438,6 +438,17 @@ module MachO
       rpath_cmds.reverse_each { |cmd| delete_command(cmd) }
     end
 
+    # Exports whose symbol names start with the given prefix.
+    # @param prefix [String] the symbol-name prefix to query
+    # @return [Array<ExportTrie::Export>] the matching exports
+    # @raise [ExportTrieError] if the export trie is truncated, cyclic, or otherwise malformed
+    def exports(prefix = "")
+      data = export_trie_data
+      return [] if data.nil? || data.empty?
+
+      ExportTrie.query(data, prefix)
+    end
+
     # Replaces the embedded signature with a pure-Ruby ad-hoc signature.
     # @param identifier [String, nil] the signing identifier
     # @return [void]
@@ -635,6 +646,31 @@ module MachO
       end
 
       load_commands
+    end
+
+    # The raw data referenced by LC_DYLD_EXPORTS_TRIE or the export region of
+    # LC_DYLD_INFO/LC_DYLD_INFO_ONLY.
+    # @return [String, nil] the export trie data, or nil if no export trie exists
+    # @raise [ExportTrieError] if a referenced export range is out of bounds
+    # @api private
+    def export_trie_data
+      exports_command = command(:LC_DYLD_EXPORTS_TRIE).first
+
+      if exports_command
+        export_range(exports_command.dataoff, exports_command.datasize)
+      else
+        dyld_info = command(:LC_DYLD_INFO).first || command(:LC_DYLD_INFO_ONLY).first
+        return nil if dyld_info.nil? || dyld_info.export_size.zero?
+
+        export_range(dyld_info.export_off, dyld_info.export_size)
+      end
+    end
+
+    def export_range(offset, size)
+      raw_size = @raw_data.bytesize
+      raise ExportTrieError, "export trie range is out of bounds" if offset > raw_size || size > raw_size - offset
+
+      @raw_data.byteslice(offset, size)
     end
 
     # Calculate the segment alignment for the Mach-O. Guesses conservatively.
