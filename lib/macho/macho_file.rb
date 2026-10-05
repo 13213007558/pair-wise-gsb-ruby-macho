@@ -273,6 +273,37 @@ module MachO
       end
     end
 
+    # The file's DWARF `.debug_line` line number programs, parsed from the
+    # `__DWARF,__debug_line` section. Each program maps addresses to source
+    # file, line, column and discriminator information.
+    # @return [Array<DWARF::DebugLine::Program>] the parsed line number programs
+    # @raise [DWARF::DebugLineError] if the section contains malformed data
+    # @see DWARF::DebugLine
+    def debug_line_programs
+      debug_line&.programs || []
+    end
+
+    # The parsed contents of the `__DWARF,__debug_line` section, or nil if the
+    # Mach-O has no such section.
+    # @return [DWARF::DebugLine, nil]
+    # @raise [DWARF::DebugLineError] if the section contains malformed data
+    def debug_line
+      return @debug_line if @debug_line_loaded
+
+      line_section = dwarf_section("__debug_line")
+      @debug_line = if line_section
+        DWARF::DebugLine.new(
+          section_data(line_section),
+          :endianness => endianness,
+          :address_size => magic32? ? 4 : 8,
+          :line_strings => dwarf_section_data("__debug_line_str"),
+          :strings => dwarf_section_data("__debug_str"),
+        )
+      end
+      @debug_line_loaded = true
+      @debug_line
+    end
+
     # The segment alignment for the Mach-O. Guesses conservatively.
     # @return [Integer] the alignment, as a power of 2
     # @note This is **not** the same as {#alignment}!
@@ -481,6 +512,32 @@ module MachO
       @dylib_load_commands = nil
       @load_commands_by_type = nil
       @segment_alignment = nil
+      @debug_line = nil
+      @debug_line_loaded = nil
+    end
+
+    # @param name [String] the name of a section within the `__DWARF` segment
+    # @return [Sections::Section, Sections::Section64, nil] the matching section, if any
+    # @api private
+    def dwarf_section(name)
+      segments.flat_map(&:sections).find do |section|
+        section.segname == "__DWARF" && section.sectname == name
+      end
+    end
+
+    # @param name [String] the name of a `__DWARF` section
+    # @return [String, nil] the section's raw contents, or nil if absent
+    # @api private
+    def dwarf_section_data(name)
+      section = dwarf_section(name)
+      section && section_data(section)
+    end
+
+    # @param section [Sections::Section, Sections::Section64] a section
+    # @return [String] the section's raw contents
+    # @api private
+    def section_data(section)
+      @raw_data.byteslice(section.offset, section.size)
     end
 
     # The file's Mach-O header structure.
