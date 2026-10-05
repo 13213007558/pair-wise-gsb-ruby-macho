@@ -262,6 +262,24 @@ module MachO
       @dylib_load_commands.dup
     end
 
+    # The export trie for this Mach-O, if it has one. Reads the
+    # LC_DYLD_EXPORTS_TRIE data if present, falling back to the export
+    # region of LC_DYLD_INFO or LC_DYLD_INFO_ONLY.
+    # @return [ExportsTrie::Trie, nil] the parsed export trie, or nil if the
+    #  Mach-O has no export trie
+    def exports_trie
+      @exports_trie ||= begin
+        trie_lc = command(:LC_DYLD_EXPORTS_TRIE).first
+        dyld_info_lc = command(:LC_DYLD_INFO).first || command(:LC_DYLD_INFO_ONLY).first
+
+        if trie_lc && trie_lc.datasize.positive?
+          trie_lc.exports_trie
+        elsif dyld_info_lc && dyld_info_lc.export_size.positive?
+          dyld_info_lc.exports_trie
+        end
+      end
+    end
+
     # All segment load commands in the Mach-O.
     # @return [Array<LoadCommands::SegmentCommand>] if the Mach-O is 32-bit
     # @return [Array<LoadCommands::SegmentCommand64>] if the Mach-O is 64-bit
@@ -479,6 +497,7 @@ module MachO
       @linked_dylibs = nil
       @rpaths = nil
       @dylib_load_commands = nil
+      @exports_trie = nil
       @load_commands_by_type = nil
       @segment_alignment = nil
     end

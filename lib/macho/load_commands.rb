@@ -1119,6 +1119,15 @@ module MachO
         CodeSigning::SuperBlob.new(view.raw_data.byteslice(dataoff, datasize))
       end
 
+      # The export trie referenced by this command.
+      # @return [ExportsTrie::Trie] the parsed export trie
+      # @raise [ExportsTrieError] if this is not an LC_DYLD_EXPORTS_TRIE command
+      def exports_trie
+        raise ExportsTrieError, "#{type} does not contain an export trie" unless type == :LC_DYLD_EXPORTS_TRIE
+
+        ExportsTrie::Trie.parse(view.raw_data.byteslice(dataoff, datasize).to_s)
+      end
+
       # @return [Hash] a hash representation of this {LinkeditDataCommand}
       def to_h
         {
@@ -1345,6 +1354,12 @@ module MachO
 
       # @return [Integer] the size of the export information
       field :export_size, :uint32
+
+      # The export trie referenced by this command.
+      # @return [ExportsTrie::Trie] the parsed export trie
+      def exports_trie
+        ExportsTrie::Trie.parse(view.raw_data.byteslice(export_off, export_size).to_s)
+      end
 
       # @return [Hash] a hash representation of this {DyldInfoCommand}
       def to_h
