@@ -256,4 +256,16 @@ module MachO
   # dependencies, or on other decompression errors.
   class DecompressionError < MachOError
   end
+
+  # Raised when Objective-C 2.0 metadata extraction fails.
+  class ObjC2Error < MachOError
+  end
+
+  # Raised when Objective-C 2.0 metadata extraction is attempted on an
+  # encrypted Mach-O image.
+  class ObjC2EncryptedImageError < ObjC2Error
+    def initialize
+      super("Cannot extract ObjC2 metadata from an encrypted Mach-O image")
+    end
+  end
 end
