@@ -189,6 +189,13 @@ module MachO
     end
   end
 
+  # Raised when the header of a relocatable object needs to grow to fit a new
+  # load command, but the object can't be grown safely (e.g. it is signed,
+  # encrypted, 32-bit, or contains load commands with file offsets that can't
+  # be updated).
+  class HeaderGrowError < ModificationError
+  end
+
   # Raised when attempting to change a dylib name that doesn't exist.
   class DylibUnknownError < RecoverableModificationError
     # @param dylib [String] the unknown shared library name

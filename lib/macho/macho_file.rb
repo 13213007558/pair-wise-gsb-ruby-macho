@@ -11,6 +11,62 @@ module MachO
   class MachOFile
     extend Forwardable
 
+    # Load commands whose presence makes header growth unsafe (signatures,
+    # linkedit data that isn't expected in relocatable objects, encryption).
+    GROWABLE_BLOCKING_LOAD_COMMANDS = %i[
+      LC_CODE_SIGNATURE
+      LC_SEGMENT_SPLIT_INFO
+      LC_FUNCTION_STARTS
+      LC_DATA_IN_CODE
+      LC_DYLIB_CODE_SIGN_DRS
+      LC_LINKER_OPTIMIZATION_HINT
+      LC_DYLD_EXPORTS_TRIE
+      LC_DYLD_CHAINED_FIXUPS
+      LC_ATOM_INFO
+      LC_FUNCTION_VARIANTS
+      LC_FUNCTION_VARIANT_FIXUPS
+      LC_LAZY_LOAD_DYLIB_INFO
+      LC_ENCRYPTION_INFO
+      LC_ENCRYPTION_INFO_64
+      LC_DYLD_INFO
+      LC_DYLD_INFO_ONLY
+      LC_NOTE
+      LC_FILESET_ENTRY
+      LC_MAIN
+      LC_SYMSEG
+      LC_TWOLEVEL_HINTS
+    ].freeze
+
+    # Load commands that are safe to see in a grown relocatable object, i.e.
+    # ones without file offsets, or ones whose offsets are rewritten explicitly.
+    OFFSET_AWARE_LOAD_COMMANDS = %i[
+      LC_SEGMENT_64
+      LC_SYMTAB
+      LC_DYSYMTAB
+      LC_BUILD_VERSION
+      LC_VERSION_MIN_MACOSX
+      LC_VERSION_MIN_IPHONEOS
+      LC_VERSION_MIN_TVOS
+      LC_VERSION_MIN_WATCHOS
+      LC_UUID
+      LC_SOURCE_VERSION
+      LC_LINKER_OPTION
+      LC_SUB_FRAMEWORK
+      LC_SUB_UMBRELLA
+      LC_SUB_CLIENT
+      LC_SUB_LIBRARY
+    ].freeze
+
+    # Field offsets (relative to the start of LC_DYSYMTAB) of its file offsets.
+    DYSYMTAB_OFFSETS = {
+      :tocoff => 40,
+      :modtaboff => 48,
+      :extrefsymoff => 56,
+      :indirectsymoff => 64,
+      :extreloff => 72,
+      :locreloff => 80,
+    }.freeze
+
     # @return [String, nil] the filename loaded from, or nil if loaded from a binary
     #  string
     attr_accessor :filename
@@ -165,6 +221,7 @@ module MachO
     #  the instance fields
     # @raise [OffsetInsertionError] if the offset is not in the load command region
     # @raise [HeaderPadError] if the new command exceeds the header pad buffer
+    # @raise [HeaderGrowError] if the header needs to grow but can't be grown safely
     # @note Calling this method with an arbitrary offset in the load command region
     # **will leave the object in an inconsistent state**.
     def insert_command(offset, lc, options = {})
@@ -172,11 +229,15 @@ module MachO
       cmd_raw = lc.serialize(context)
       fileoff = offset + cmd_raw.bytesize
 
-      raise OffsetInsertionError, offset if offset < header.class.bytesize || fileoff > low_fileoff
+      raise OffsetInsertionError, offset if offset < header.class.bytesize || offset > end_of_commands
+
+      if fileoff > low_fileoff
+        return grow_object_header(offset, cmd_raw, options) if grow_header_allowed?
+
+        raise HeaderPadError, @filename
+      end
 
       new_sizeofcmds = sizeofcmds + cmd_raw.bytesize
-
-      raise HeaderPadError, @filename if header.class.bytesize + new_sizeofcmds > low_fileoff
 
       # update Mach-O header fields to account for inserted load command
       update_ncmds(ncmds + 1)
@@ -219,6 +280,22 @@ module MachO
     #  afterwards.
     def add_command(lc, options = {})
       insert_command(header.class.bytesize + sizeofcmds, lc, options)
+    end
+
+    # Appends a new LC_LINKER_OPTION load command containing the given options
+    # to the Mach-O. For relocatable objects without enough header padding the
+    # header is grown by shifting the sections, relocation entries, symbol
+    # table and string table further into the file and updating their offsets.
+    # @param options [Array<String>] one or more linker option strings, passed
+    #  individually or as a single array
+    # @return [void]
+    # @raise [HeaderGrowError] if the header needs to grow but can't be grown safely
+    # @see #add_command
+    def add_linker_option(*options)
+      options = options.flatten
+      raise ArgumentError, "expected at least one linker option" if options.empty?
+
+      add_command(LoadCommands::LoadCommand.create(:LC_LINKER_OPTION, options))
     end
 
     # Delete a load command from the Mach-O.
@@ -684,6 +761,215 @@ module MachO
       end
 
       offset
+    end
+
+    # The offset immediately following the last load command.
+    # @return [Integer] the end of the load command region
+    # @api private
+    def end_of_commands
+      header.class.bytesize + sizeofcmds
+    end
+
+    # Whether or not the load command region of this Mach-O may grow by
+    # shifting the data that follows it. Only unsigned, unencrypted 64-bit
+    # x86_64 or arm64 relocatable objects are eligible: executables, dylibs and
+    # other filetypes map their data using virtual addresses and can't be moved
+    # this way.
+    # @return [Boolean]
+    # @api private
+    def grow_header_allowed?
+      return false unless magic64? && object?
+      return false unless %i[x86_64 arm64].include?(cputype)
+
+      GROWABLE_BLOCKING_LOAD_COMMANDS.all? { |type| command(type).empty? }
+    end
+
+    # Grows the load command region of an eligible relocatable object to make
+    # room for `cmd_raw`, shifting all data that follows the load commands and
+    # updating every file offset that referred to it. Section addresses,
+    # symbol values and the meaning of the relocation entries are preserved.
+    # @param offset [Integer] the offset to insert the command at
+    # @param cmd_raw [String] the serialized load command
+    # @param options [Hash] the options passed to {#insert_command}
+    # @return [void]
+    # @raise [HeaderGrowError] if any load command may carry a file offset
+    #  that we don't know how to update, or if the object is otherwise ineligible
+    # @api private
+    def grow_object_header(offset, cmd_raw, options)
+      raise HeaderGrowError, "load commands can only be appended to relocatable objects" unless offset == end_of_commands
+      raise HeaderGrowError, "headers can only be grown for unsigned, unencrypted 64-bit relocatable objects" unless grow_header_allowed?
+
+      # Every load command present must be one whose file offsets (if any) we
+      # know how to rewrite. Unknown commands may point into the shifted data.
+      load_commands.each do |lc|
+        next if OFFSET_AWARE_LOAD_COMMANDS.include?(lc.type)
+
+        command_description = lc.type || format("unknown load command 0x%08<cmd>x", :cmd => lc.cmd)
+        raise HeaderGrowError,
+              "can't grow the header past #{command_description} (#{lc.cmdsize} bytes), which may " \
+              "contain file offsets"
+      end
+
+      # Locate the payload from the current commands (it may already have been
+      # shifted by a previous growth) and detach it before rewriting offsets.
+      payload_offset = current_payload_offset
+      shift = object_header_growth(cmd_raw.bytesize, payload_offset)
+      payload = @raw_data.slice!(payload_offset, @raw_data.size - payload_offset)
+
+      shift_object_file_offsets(shift, payload_offset)
+
+      old_end_of_commands = end_of_commands
+      new_sizeofcmds = sizeofcmds + cmd_raw.bytesize
+      new_payload_offset = payload_offset + shift
+      # The new command goes directly after the current load commands and any
+      # required alignment padding is re-added before the (detached) payload,
+      # consuming or replacing prior header padding as needed.
+      @raw_data = @raw_data.byteslice(0, old_end_of_commands) + cmd_raw +
+                  Utils.nullpad(new_payload_offset - (old_end_of_commands + cmd_raw.bytesize)) +
+                  payload
+
+      update_ncmds(ncmds + 1)
+      update_sizeofcmds(new_sizeofcmds)
+
+      populate_fields if options.fetch(:repopulate, true)
+    end
+
+    # Computes the number of bytes the load command region must grow by, taking
+    # both the new command and the alignment of the first section into account.
+    # @param cmd_size [Integer] the size of the serialized new command
+    # @param payload_offset [Integer] the current offset of the section payload
+    # @return [Integer] the total growth, in bytes
+    # @api private
+    def object_header_growth(cmd_size, payload_offset)
+      alignment = 8
+      segments.each do |segment|
+        segment.sections.each do |section|
+          next if section.empty?
+          next if section.type?(:S_ZEROFILL)
+          next if section.type?(:S_THREAD_LOCAL_ZEROFILL)
+
+          alignment = 2**section.align if section.align > 2 && 2**section.align > alignment
+        end
+      end
+
+      new_payload_end = Utils.round(end_of_commands + cmd_size, alignment)
+      growth = new_payload_end - end_of_commands
+      # The computed growth assumes the payload starts right after the current
+      # commands. If the file already carries header padding, only grow by the
+      # amount that padding can't absorb.
+      [growth - (payload_offset - end_of_commands), 0].max
+    end
+
+    # The current offset of the first non-zerofill section data.
+    # @return [Integer] the payload offset
+    # @api private
+    def current_payload_offset
+      offset = @raw_data.size
+      segments.each do |segment|
+        segment.sections.each do |section|
+          next if section.empty?
+          next if section.type?(:S_ZEROFILL)
+          next if section.type?(:S_THREAD_LOCAL_ZEROFILL)
+          next unless section.offset < offset
+
+          offset = section.offset
+        end
+      end
+      offset
+    end
+
+    # Rewrites every file offset carried by the existing load commands so that
+    # it still points at the same data after the header grows by `shift` bytes.
+    # @param shift [Integer] the number of bytes the payload moves
+    # @param payload_offset [Integer] the current offset of the payload
+    # @return [void]
+    # @api private
+    def shift_object_file_offsets(shift, payload_offset)
+      load_commands.each do |lc|
+        case lc
+        when LoadCommands::SegmentCommand64
+          shift_segment_file_offsets(lc, shift, payload_offset)
+        when LoadCommands::SymtabCommand
+          patch_uint32(lc.view.offset + 8, shifted_offset(lc.symoff, shift, payload_offset)) if lc.symoff.positive?
+          patch_uint32(lc.view.offset + 16, shifted_offset(lc.stroff, shift, payload_offset)) if lc.stroff.positive?
+        when LoadCommands::DysymtabCommand
+          shift_dysymtab_offsets(lc, shift, payload_offset)
+        end
+      end
+    end
+
+    # Updates the file offsets of a 64-bit segment, its sections and the
+    # sections' relocation tables.
+    # @param segment [LoadCommands::SegmentCommand64] the segment to update
+    # @param shift [Integer] the number of bytes the payload moves
+    # @param payload_offset [Integer] the current offset of the payload
+    # @return [void]
+    # @api private
+    def shift_segment_file_offsets(segment, shift, payload_offset)
+      base = segment.view.offset
+      # In relocatable objects the segment's fileoff is the start of the
+      # section payload (typically 0) and filesize spans every section.
+      patch_uint64(base + 40, shifted_offset(segment.fileoff, shift, payload_offset)) unless segment.filesize.zero?
+
+      section_base = base + LoadCommands::SegmentCommand64.bytesize
+      segment.sections.each_with_index do |section, index|
+        section_offset = section_base + (index * Sections::Section64.bytesize)
+        unless section.empty?
+          patch_uint32(section_offset + 48, shifted_offset(section.offset, shift, payload_offset))
+        end
+        if section.reloff.positive?
+          patch_uint32(section_offset + 56, shifted_offset(section.reloff, shift, payload_offset))
+        end
+      end
+    end
+
+    # Updates the file offsets in an LC_DYSYMTAB command. Index fields refer to
+    # symbol table entries rather than file offsets and are left alone.
+    # @param dysymtab [LoadCommands::DysymtabCommand] the command to update
+    # @param shift [Integer] the number of bytes the payload moves
+    # @param payload_offset [Integer] the current offset of the payload
+    # @return [void]
+    # @api private
+    def shift_dysymtab_offsets(dysymtab, shift, payload_offset)
+      base = dysymtab.view.offset
+      DYSYMTAB_OFFSETS.each do |name, field_offset|
+        value = dysymtab.public_send(name)
+        next if value.zero?
+
+        patch_uint32(base + field_offset, shifted_offset(value, shift, payload_offset))
+      end
+    end
+
+    # Returns the new file offset for a value that points at or past the
+    # payload. Values in the load command region itself are left untouched.
+    # @param value [Integer] the current file offset
+    # @param shift [Integer] the number of bytes the payload moves
+    # @param payload_offset [Integer] the current offset of the payload
+    # @return [Integer] the new file offset
+    # @api private
+    def shifted_offset(value, shift, payload_offset)
+      return value if shift.zero?
+      return value if value < payload_offset
+
+      value + shift
+    end
+
+    # Overwrites a 32-bit unsigned integer at the given absolute file offset.
+    # @param offset [Integer] the file offset
+    # @param value [Integer] the new value
+    # @return [void]
+    # @api private
+    def patch_uint32(offset, value)
+      @raw_data[offset, 4] = [value].pack(Utils.specialize_format("L=", endianness))
+    end
+
+    # Overwrites a 64-bit unsigned integer at the given absolute file offset.
+    # @param offset [Integer] the file offset
+    # @param value [Integer] the new value
+    # @return [void]
+    # @api private
+    def patch_uint64(offset, value)
+      @raw_data[offset, 8] = [value].pack(Utils.specialize_format("Q=", endianness))
     end
 
     # Updates the number of load commands in the raw data.

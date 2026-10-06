@@ -270,6 +270,22 @@ module MachO
       repopulate_raw_machos
     end
 
+    # Adds an LC_LINKER_OPTION load command to each slice. Unlike rpath or
+    # dylib edits this can grow a relocatable object's header, changing the
+    # size of its slice, so the fat container layout is rebuilt afterwards.
+    # @param options [Array<String>] one or more linker option strings
+    # @return [void]
+    # @see MachOFile#add_linker_option
+    def add_linker_option(*options)
+      modify_options = options.last.is_a?(Hash) ? options.pop : {}
+
+      each_macho(modify_options) do |macho|
+        macho.add_linker_option(*options)
+      end
+
+      repopulate_resized_raw_machos
+    end
+
     # Delete the given runtime path from the file's Mach-Os.
     # @param path [String] the runtime path to delete
     # @param options [Hash]
@@ -439,7 +455,8 @@ module MachO
       offset = header_size
 
       fat_archs.zip(machos).each_with_index do |(arch, macho), index|
-        macho_offset = Utils.round(offset, 2**arch.align)
+        macho_align = 2**[arch.align, macho.segment_alignment].max
+        macho_offset = Utils.round(offset, macho_align)
         slices << Utils.nullpad(macho_offset - offset) << macho.serialize
         arch_offset = Headers::FatHeader.bytesize + (index * fat_arch_class.bytesize)
         if fat_arch_class == Headers::FatArch

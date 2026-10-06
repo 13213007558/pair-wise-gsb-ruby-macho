@@ -93,6 +93,7 @@ module MachO
       LC_RPATH
       LC_LOAD_DYLINKER
       LC_CODE_SIGNATURE
+      LC_LINKER_OPTION
     ].freeze
 
     # association of load command symbols to string representations of classes
@@ -249,6 +250,8 @@ module MachO
       # @param args [Array] the arguments for the load command being created
       def self.create(cmd_sym, *args)
         raise LoadCommandNotCreatableError, cmd_sym unless CREATABLE_LOAD_COMMANDS.include?(cmd_sym)
+
+        return LinkerOptionCommand.create_linker_option(cmd_sym, *args) if cmd_sym == :LC_LINKER_OPTION
 
         klass = LoadCommands.const_get LC_STRUCTURES[cmd_sym]
         cmd = LOAD_COMMAND_CONSTANTS[cmd_sym]
@@ -1369,11 +1372,65 @@ module MachO
       # @return [Integer] the number of strings
       field :count, :uint32
 
+      # Creates a new linker option load command containing the given options.
+      # @param cmd_sym [Symbol] the symbol of the load command being created
+      # @param args [Array<String>] the linker option strings
+      # @return [LinkerOptionCommand] the new load command
+      def self.create_linker_option(cmd_sym, *args)
+        options = args.flatten
+        raise ArgumentError, "expected at least one linker option" if options.empty?
+        raise ArgumentError, "linker options must be strings" unless options.all? { |arg| arg.is_a?(String) }
+
+        cmd = LOAD_COMMAND_CONSTANTS[cmd_sym]
+        new(nil, cmd, nil, options.size, options)
+      end
+
+      # @param view [MachO::MachOView, nil] the raw view, or nil for a manually
+      #  created command
+      # @param cmd [Integer] the load command's type ID
+      # @param cmdsize [Integer, nil] the size of the load command
+      # @param count [Integer] the number of strings
+      # @param options [Array<String>, nil] the option strings, if created manually
+      def initialize(view, cmd, cmdsize, count, options = nil)
+        super(view, cmd, cmdsize, count)
+        @options = options
+      end
+
+      # @return [Array<String>] the linker option strings
+      def options
+        @options ||= parse_options
+      end
+
+      # @param context [SerializationContext] the context
+      # @return [String] the serialized fields of the load command
+      # @api private
+      def serialize(context)
+        format = Utils.specialize_format(self.class.format, context.endianness)
+        payload = options.map { |option| String.new(option, :encoding => Encoding::BINARY) + "\x00" }.join
+        payload << Utils.nullpad((-(self.class.bytesize + payload.bytesize)) % context.alignment)
+        cmdsize = self.class.bytesize + payload.bytesize
+        [cmd, cmdsize, options.size].pack(format) + payload
+      end
+
       # @return [Hash] a hash representation of this {LinkerOptionCommand}
       def to_h
         {
           "count" => count,
+          "options" => options,
         }.merge super
+      end
+
+      private
+
+      # Parses the null-terminated option strings from the raw load command.
+      # @return [Array<String>] the linker option strings
+      # @api private
+      def parse_options
+        return [] if view.nil?
+
+        payload = view.raw_data.byteslice(view.offset + self.class.bytesize,
+                                         cmdsize - self.class.bytesize)
+        payload.to_s.unpack("Z*" * count)
       end
     end
 
