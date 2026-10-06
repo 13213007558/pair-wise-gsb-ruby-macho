@@ -56,6 +56,28 @@ the required ad-hoc signature in Ruby instead of invoking `/usr/bin/codesign`:
 MachO.codesign!("/path/to/my/binary")
 ```
 
+### Relocation evaluation
+
+MachO::Relocations evaluates the relocations of an MH_OBJECT section in pure
+Ruby for x86_64 and arm64. It resolves UNSIGNED, SIGNED, BRANCH, and
+SUBTRACTOR relocations on x86_64 and UNSIGNED, BRANCH26, PAGE21, PAGEOFF12,
+and ADDEND relocations on arm64 (including ADRP/ADD and LDR/STR immediate
+fields), returning the patched section bytes and per-entry computation
+details. It never executes the patched code and never shells out to a linker;
+all other relocation types are explicitly reported as unsupported.
+
+```ruby
+require "macho"
+
+file = MachO.open("object.o")
+section = file.segments.flat_map(&:sections).first
+bytes, results = MachO::Relocations.evaluate_section(
+  file, section,
+  :symbol_addresses => { 0 => 0x100000f20 },
+  :section_addresses => { 1 => 0x100000000 },
+)
+```
+
 
 ### What works?
 

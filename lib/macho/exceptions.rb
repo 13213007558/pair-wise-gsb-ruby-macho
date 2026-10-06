@@ -256,4 +256,27 @@ module MachO
   # dependencies, or on other decompression errors.
   class DecompressionError < MachOError
   end
+
+  # Raised when a relocation entry or relocation operation is invalid.
+  class RelocationError < MachOError
+  end
+
+  # Raised when a relocation references a symbol missing from the external
+  # symbol address table.
+  class RelocationSymbolError < RelocationError
+  end
+
+  # Raised when a relocation references a section missing from the supplied
+  # section layout.
+  class RelocationSectionError < RelocationError
+  end
+
+  # Raised when a relocation type is not supported by the evaluator.
+  class UnsupportedRelocationTypeError < RelocationError
+  end
+
+  # Raised when a computed relocation value does not fit in its field, or in
+  # the immediate field of the instruction being relocated.
+  class RelocationOverflowError < RelocationError
+  end
 end
