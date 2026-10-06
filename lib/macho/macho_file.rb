@@ -262,6 +262,19 @@ module MachO
       @dylib_load_commands.dup
     end
 
+    # The decoded `LC_DYLD_CHAINED_FIXUPS` payload, if present.
+    # @return [ChainedFixups::ChainedFixupSet, nil] the enumerated fixups,
+    #  or nil if the image has no `LC_DYLD_CHAINED_FIXUPS` load command
+    # @raise [ChainedFixupError] if the chained fixups payload is malformed
+    # @note This is a read-only view: the image's raw data is never modified
+    #  and pointer authentication (PAC) is not computed.
+    def chained_fixups
+      @chained_fixups ||= begin
+        command = command(:LC_DYLD_CHAINED_FIXUPS).first
+        ChainedFixups::ChainedFixupSet.parse(self, command) if command
+      end
+    end
+
     # All segment load commands in the Mach-O.
     # @return [Array<LoadCommands::SegmentCommand>] if the Mach-O is 32-bit
     # @return [Array<LoadCommands::SegmentCommand64>] if the Mach-O is 64-bit
@@ -481,6 +494,7 @@ module MachO
       @dylib_load_commands = nil
       @load_commands_by_type = nil
       @segment_alignment = nil
+      @chained_fixups = nil
     end
 
     # The file's Mach-O header structure.
