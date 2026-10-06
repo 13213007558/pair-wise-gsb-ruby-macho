@@ -9,6 +9,10 @@ module MachO
   class ModificationError < MachOError
   end
 
+  # Raised when relocation evaluation fails.
+  class RelocationError < MachOError
+  end
+
   # Raised when codesigning fails. Certain environments
   # may want to rescue this to treat it as non-fatal.
   class CodeSigningError < MachOError
