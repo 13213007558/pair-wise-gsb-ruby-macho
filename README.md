@@ -64,6 +64,7 @@ MachO.codesign!("/path/to/my/binary")
 * Changing install names in Mach-O and Fat files
 * Adding, deleting, and modifying rpaths.
 * Parsing embedded code signatures and applying ad-hoc signatures in pure Ruby.
+* Reading paired MH_OBJECT relocations for x86_64 and arm64.
 
 ### Contributing
 

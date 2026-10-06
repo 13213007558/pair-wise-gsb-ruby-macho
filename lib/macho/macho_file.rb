@@ -273,6 +273,40 @@ module MachO
       end
     end
 
+    # All sections in the Mach-O, in their flat section-ordinal order.
+    # @return [Array<Sections::Section>, Array<Sections::Section64>] all sections
+    def sections
+      segments.flat_map(&:sections)
+    end
+
+    # Parses every section relocation table and interprets linker-specific
+    # paired records as one logical operation.
+    # @return [Relocations::RelocationTable] grouped operations, raw entries, and diagnostics
+    def relocations(strict: false)
+      @relocations ||= Relocations::RelocationParser.new(self).parse
+      if strict
+        begin
+          @relocations.strict!
+        rescue RelocationError
+          @relocations = nil
+          raise
+        end
+      end
+      @relocations
+    end
+
+    alias read_relocations relocations
+    alias parse_relocations relocations
+
+    # Parses the relocation table for one section object.
+    # @param section [Sections::Section] the section to read
+    # @return [Relocations::RelocationTable] the operations contained in the section
+    def relocations_for_section(section)
+      relocations_for_ordinal(section_ordinal(section), header.cputype)
+    end
+
+    alias section_relocations relocations_for_section
+
     # The segment alignment for the Mach-O. Guesses conservatively.
     # @return [Integer] the alignment, as a power of 2
     # @note This is **not** the same as {#alignment}!
@@ -481,6 +515,7 @@ module MachO
       @dylib_load_commands = nil
       @load_commands_by_type = nil
       @segment_alignment = nil
+      @relocations = nil
     end
 
     # The file's Mach-O header structure.
@@ -635,6 +670,33 @@ module MachO
       end
 
       load_commands
+    end
+
+    # @api private
+    def relocations_for_ordinal(ordinal, cputype = header.cputype)
+      table = relocations
+      section_entries = table.entries.select { |entry| entry.section_index == ordinal }
+      operations = table.operations.select { |operation| operation.section_index == ordinal }
+      diagnostics = table.diagnostics.select do |diagnostic|
+        diagnostic.section_index.nil? || diagnostic.section_index == ordinal
+      end
+      Relocations::RelocationTable.new(operations, section_entries, diagnostics,
+                                       ordinal => cputype)
+    end
+
+    # @api private
+    def section_ordinal(section)
+      ordinal = 0
+      sections.each do |candidate|
+        ordinal += 1
+        return ordinal if candidate.equal?(section) || same_section?(candidate, section)
+      end
+      raise ArgumentError, "section is not part of this Mach-O file"
+    end
+
+    def same_section?(actual, given)
+      actual.sectname == given.sectname && actual.segname == given.segname &&
+        actual.addr == given.addr && actual.offset == given.offset
     end
 
     # Calculate the segment alignment for the Mach-O. Guesses conservatively.

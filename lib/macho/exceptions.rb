@@ -256,4 +256,16 @@ module MachO
   # dependencies, or on other decompression errors.
   class DecompressionError < MachOError
   end
+
+  # Raised when a section relocation table contains malformed or unsupported
+  # records and parsing was requested in strict mode.
+  class RelocationError < MachOError
+    # @return [Array<Hash>] structured relocation diagnostics
+    attr_reader :diagnostics
+
+    def initialize(diagnostics)
+      @diagnostics = diagnostics
+      super(diagnostics.first&.fetch("message", "invalid relocation records"))
+    end
+  end
 end
