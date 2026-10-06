@@ -256,4 +256,44 @@ module MachO
   # dependencies, or on other decompression errors.
   class DecompressionError < MachOError
   end
+
+  # Raised when an LC_DYLD_CHAINED_FIXUPS payload or one of its sub-structures
+  # is malformed, truncated, or otherwise invalid.
+  class ChainedFixupsError < MachOError
+  end
+
+  # Raised when a fixup chain points at a location that is outside the page
+  # described by its {MachO::ChainedFixups::StartsInSegment}.
+  class ChainedFixupsChainOutOfBoundsError < ChainedFixupsError
+    # @param offset [Integer] the runtime-relative offset that ran out of bounds
+    # @param details [String] additional context about the failure
+    def initialize(offset, details = nil)
+      message = "Chained fixup chain ran out of page bounds at runtime offset " \
+                "0x%<offset>x" % { :offset => offset }
+      message += " (#{details})" unless details.nil?
+      super(message)
+    end
+  end
+
+  # Raised when a fixup chain visits the same location more than once, which
+  # would otherwise cause parsing to loop forever.
+  class ChainedFixupsDuplicateLocationError < ChainedFixupsError
+    # @param offset [Integer] the runtime-relative offset visited twice
+    def initialize(offset)
+      super("Chained fixup chain visits the same location twice at runtime " \
+            "offset 0x%<offset>x" % { :offset => offset })
+    end
+  end
+
+  # Raised when a chained bind references an import ordinal that does not exist
+  # in the imports table.
+  class ChainedFixupsBadOrdinalError < ChainedFixupsError
+    # @param ordinal [Integer] the offending import ordinal
+    # @param details [String] additional context about the failure
+    def initialize(ordinal, details = nil)
+      message = "Chained fixup references nonexistent import ordinal #{ordinal}"
+      message += " (#{details})" unless details.nil?
+      super(message)
+    end
+  end
 end

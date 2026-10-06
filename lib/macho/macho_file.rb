@@ -445,6 +445,16 @@ module MachO
       CodeSigning::AdhocSigner.new(self, identifier || CodeSigning.identifier(self, filename)).sign!
     end
 
+    # The chained fixups described by the file's LC_DYLD_CHAINED_FIXUPS load
+    # command, if present. The returned object is read-only: it enumerates
+    # binds and rebases without applying them.
+    # @return [ChainedFixups, nil] the parsed chained fixups, or nil if the
+    #  file has no LC_DYLD_CHAINED_FIXUPS command
+    # @raise [ChainedFixupsError] if the payload is malformed
+    def chained_fixups
+      @chained_fixups ||= command(:LC_DYLD_CHAINED_FIXUPS).first&.chained_fixups
+    end
+
     # Write all Mach-O data to the given filename.
     # @param filename [String] the file to write to
     # @return [void]
@@ -481,6 +491,7 @@ module MachO
       @dylib_load_commands = nil
       @load_commands_by_type = nil
       @segment_alignment = nil
+      @chained_fixups = nil
     end
 
     # The file's Mach-O header structure.

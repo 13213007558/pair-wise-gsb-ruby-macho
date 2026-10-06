@@ -173,6 +173,14 @@ module MachO
       machos.flat_map(&:dylib_load_commands)
     end
 
+    # The chained fixups for each architecture slice. Slices without an
+    # LC_DYLD_CHAINED_FIXUPS command contribute nil.
+    # @return [Array<ChainedFixups, nil>] one parsed payload (or nil) per slice
+    # @see MachOFile#chained_fixups
+    def chained_fixups
+      machos.map(&:chained_fixups)
+    end
+
     # Changes the file's dylib ID to `new_id`. If the file is not a dylib,
     #  does nothing.
     # @example

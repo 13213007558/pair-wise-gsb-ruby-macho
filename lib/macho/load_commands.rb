@@ -1119,6 +1119,18 @@ module MachO
         CodeSigning::SuperBlob.new(view.raw_data.byteslice(dataoff, datasize))
       end
 
+      # A read-only parser for an LC_DYLD_CHAINED_FIXUPS payload.
+      # @return [ChainedFixups] the parsed chained fixups
+      # @raise [CodeSigningError] if this is not an LC_DYLD_CHAINED_FIXUPS command
+      # @raise [ChainedFixupsError] if the payload is malformed
+      def chained_fixups
+        unless type == :LC_DYLD_CHAINED_FIXUPS
+          raise ChainedFixupsError, "#{type} does not contain chained fixups"
+        end
+
+        @chained_fixups ||= ChainedFixups.new(view.macho_file, self)
+      end
+
       # @return [Hash] a hash representation of this {LinkeditDataCommand}
       def to_h
         {
