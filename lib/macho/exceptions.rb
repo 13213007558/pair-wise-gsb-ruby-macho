@@ -189,6 +189,14 @@ module MachO
     end
   end
 
+  # Raised when a load command can only be added by growing the header, but the
+  # Mach-O does not support that operation.
+  class HeaderGrowError < ModificationError
+    def initialize(reason)
+      super("Cannot grow the Mach-O header: #{reason}")
+    end
+  end
+
   # Raised when attempting to change a dylib name that doesn't exist.
   class DylibUnknownError < RecoverableModificationError
     # @param dylib [String] the unknown shared library name

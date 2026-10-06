@@ -93,6 +93,7 @@ module MachO
       LC_RPATH
       LC_LOAD_DYLINKER
       LC_CODE_SIGNATURE
+      LC_LINKER_OPTION
     ].freeze
 
     # association of load command symbols to string representations of classes
@@ -1369,10 +1370,37 @@ module MachO
       # @return [Integer] the number of strings
       field :count, :uint32
 
+      # @return [Array<String>] the linker option strings
+      attr_reader :strings
+
+      def initialize(view, cmd, cmdsize, *strings)
+        count = strings.length
+        super(view, cmd, cmdsize, count)
+        @strings = strings
+      end
+
+      # @param context [SerializationContext] the context
+      # @return [String] the serialized fields of the load command
+      # @api private
+      def serialize(context)
+        format = Utils.specialize_format("L=3", context.endianness)
+        payload = +"".b
+
+        strings.each do |string|
+          payload << string
+          payload << Utils.nullpad(1)
+          payload << Utils.nullpad(Utils.padding_for(self.class.bytesize + payload.bytesize,
+                                                     context.alignment))
+        end
+
+        [cmd, self.class.bytesize + payload.bytesize, strings.length].pack(format) + payload
+      end
+
       # @return [Hash] a hash representation of this {LinkerOptionCommand}
       def to_h
         {
           "count" => count,
+          "strings" => strings,
         }.merge super
       end
     end

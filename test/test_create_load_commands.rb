@@ -66,4 +66,12 @@ class MachOLoadCommandCreationTest < Minitest::Test
     assert_equal "test", lc.path.to_s
     assert_equal lc.path.to_s, lc.to_s
   end
+
+  def test_create_linker_option_command
+    lc = MachO::LoadCommands::LoadCommand.create(:LC_LINKER_OPTION, "-framework", "Foundation")
+
+    assert_kind_of MachO::LoadCommands::LinkerOptionCommand, lc
+    assert_equal 2, lc.count
+    assert_equal %w[-framework Foundation], lc.strings
+  end
 end

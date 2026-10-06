@@ -11,6 +11,22 @@ module MachO
   class MachOFile
     extend Forwardable
 
+    KNOWN_OBJECT_LOAD_COMMANDS = %i[
+      LC_SEGMENT_64 LC_SYMTAB LC_DYSYMTAB LC_LOAD_DYLIB LC_ID_DYLIB
+      LC_LOAD_DYLINKER LC_ID_DYLINKER LC_LOAD_WEAK_DYLIB LC_REEXPORT_DYLIB
+      LC_LAZY_LOAD_DYLIB LC_LOAD_UPWARD_DYLIB LC_UUID LC_RPATH
+      LC_VERSION_MIN_MACOSX LC_VERSION_MIN_IPHONEOS LC_VERSION_MIN_TVOS
+      LC_VERSION_MIN_WATCHOS LC_SOURCE_VERSION LC_BUILD_VERSION
+      LC_LINKER_OPTION LC_MAIN LC_DYLD_ENVIRONMENT LC_SUB_FRAMEWORK
+      LC_SUB_UMBRELLA LC_SUB_CLIENT LC_SUB_LIBRARY LC_PREBOUND_DYLIB
+      LC_ROUTINES_64 LC_TWOLEVEL_HINTS LC_DYLD_INFO LC_DYLD_INFO_ONLY
+      LC_CODE_SIGNATURE LC_SEGMENT_SPLIT_INFO LC_FUNCTION_STARTS
+      LC_DATA_IN_CODE LC_DYLIB_CODE_SIGN_DRS LC_LINKER_OPTIMIZATION_HINT
+      LC_DYLD_EXPORTS_TRIE LC_DYLD_CHAINED_FIXUPS LC_NOTE LC_FILESET_ENTRY
+      LC_ATOM_INFO LC_FUNCTION_VARIANTS LC_FUNCTION_VARIANT_FIXUPS
+      LC_TARGET_TRIPLE LC_LAZY_LOAD_DYLIB_INFO LC_SYMSEG
+    ].freeze
+
     # @return [String, nil] the filename loaded from, or nil if loaded from a binary
     #  string
     attr_accessor :filename
@@ -172,11 +188,16 @@ module MachO
       cmd_raw = lc.serialize(context)
       fileoff = offset + cmd_raw.bytesize
 
-      raise OffsetInsertionError, offset if offset < header.class.bytesize || fileoff > low_fileoff
+      validate_object_header_growth! if grow_object_header?(lc)
+
+      raise OffsetInsertionError, offset if offset < header.class.bytesize || offset > low_fileoff
 
       new_sizeofcmds = sizeofcmds + cmd_raw.bytesize
 
-      raise HeaderPadError, @filename if header.class.bytesize + new_sizeofcmds > low_fileoff
+      if header.class.bytesize + new_sizeofcmds > low_fileoff
+        return grow_object_header(lc, cmd_raw) if grow_object_header?(lc)
+        raise HeaderPadError, @filename
+      end
 
       # update Mach-O header fields to account for inserted load command
       update_ncmds(ncmds + 1)
@@ -219,6 +240,13 @@ module MachO
     #  afterwards.
     def add_command(lc, options = {})
       insert_command(header.class.bytesize + sizeofcmds, lc, options)
+    end
+
+    # Add a linker option to a relocatable object file.
+    # @param option [String] the linker option to add
+    # @return [void]
+    def add_linker_option(option)
+      add_command(LoadCommands::LoadCommand.create(:LC_LINKER_OPTION, option))
     end
 
     # Delete a load command from the Mach-O.
@@ -684,6 +712,113 @@ module MachO
       end
 
       offset
+    end
+
+    def grow_object_header?(lc)
+      lc.type == :LC_LINKER_OPTION
+    end
+
+    def grow_object_header(_lc, cmd_raw)
+      validate_object_header_growth!
+
+      alignment = object_header_growth_alignment
+      cmd_raw = cmd_raw.b + Utils.nullpad(Utils.padding_for(cmd_raw.bytesize, alignment))
+      delta = Utils.round(cmd_raw.bytesize, alignment)
+
+      update_existing_file_offsets(delta)
+      @raw_data.insert(header.class.bytesize + sizeofcmds, cmd_raw)
+      update_ncmds(ncmds + 1)
+      update_sizeofcmds(sizeofcmds + delta)
+      populate_fields
+    end
+
+    def validate_object_header_growth!
+      unless magic64? && object? && endianness == :little
+        raise HeaderGrowError, "only little-endian 64-bit MH_OBJECT files are supported"
+      end
+
+      unless %i[x86_64 arm64].include?(cputype)
+        raise HeaderGrowError, "only x86_64 and arm64 objects are supported"
+      end
+
+      if command(:LC_CODE_SIGNATURE).any? ||
+         command(:LC_ENCRYPTION_INFO).any? ||
+         command(:LC_ENCRYPTION_INFO_64).any?
+        raise HeaderGrowError, "signed or encrypted objects are not supported"
+      end
+
+      load_commands.each do |command|
+        unless KNOWN_OBJECT_LOAD_COMMANDS.include?(command.type)
+          raise HeaderGrowError, "unsupported load command #{command.type.inspect}"
+        end
+      end
+    end
+
+    def object_header_growth_alignment
+      section_alignments = segments.flat_map { |segment| segment.sections.map(&:align) }.compact
+      section_alignments.empty? ? header.alignment : 2**section_alignments.max
+    end
+
+    def update_existing_file_offsets(delta)
+      load_commands.each do |lc|
+        update_command_file_offsets(lc, delta)
+      end
+    end
+
+    def update_command_file_offsets(lc, delta)
+      case lc.type
+      when :LC_SEGMENT_64
+        update_uint64_field(lc, 40, delta)
+        update_section_file_offsets(lc, delta)
+      when :LC_SYMTAB
+        update_uint32_field(lc, 8, delta)
+        update_uint32_field(lc, 16, delta)
+      when :LC_DYSYMTAB
+        [32, 40, 48, 56, 64, 72].each { |field_offset| update_uint32_field(lc, field_offset, delta) }
+      when :LC_SYMSEG
+        update_uint32_field(lc, 8, delta)
+      when :LC_TWOLEVEL_HINTS
+        update_uint32_field(lc, 8, delta)
+      when :LC_DYLD_INFO, :LC_DYLD_INFO_ONLY
+        [8, 16, 24, 32, 40].each { |field_offset| update_uint32_field(lc, field_offset, delta) }
+      when :LC_CODE_SIGNATURE, :LC_SEGMENT_SPLIT_INFO, :LC_FUNCTION_STARTS,
+           :LC_DATA_IN_CODE, :LC_DYLIB_CODE_SIGN_DRS, :LC_LINKER_OPTIMIZATION_HINT,
+           :LC_DYLD_EXPORTS_TRIE, :LC_DYLD_CHAINED_FIXUPS, :LC_ATOM_INFO,
+           :LC_FUNCTION_VARIANTS, :LC_FUNCTION_VARIANT_FIXUPS, :LC_LAZY_LOAD_DYLIB_INFO
+        update_uint32_field(lc, 8, delta)
+      when :LC_NOTE
+        update_uint64_field(lc, 24, delta)
+      when :LC_FILESET_ENTRY
+        update_uint64_field(lc, 16, delta)
+      end
+    end
+
+    def update_section_file_offsets(segment, delta)
+      section_class = Sections::Section64
+      section_offset = segment.view.offset + segment.class.bytesize
+
+      segment.nsects.times do |index|
+        offset = section_offset + (index * section_class.bytesize)
+        update_uint32_at(offset + 48, delta)
+        update_uint32_at(offset + 56, delta)
+      end
+    end
+
+    def update_uint32_field(command, field_offset, delta)
+      update_uint32_at(command.view.offset + field_offset, delta)
+    end
+
+    def update_uint64_field(command, field_offset, delta)
+      format = Utils.specialize_format("Q=", endianness)
+      offset = command.view.offset + field_offset
+      value = @raw_data.unpack1(format, :offset => offset)
+      @raw_data[offset, 8] = [value + delta].pack(format) unless value.zero?
+    end
+
+    def update_uint32_at(offset, delta)
+      format = Utils.specialize_format("L=", endianness)
+      value = @raw_data.unpack1(format, :offset => offset)
+      @raw_data[offset, 4] = [value + delta].pack(format) unless value.zero?
     end
 
     # Updates the number of load commands in the raw data.

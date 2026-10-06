@@ -270,6 +270,23 @@ module MachO
       repopulate_raw_machos
     end
 
+    # Add the given linker option to eligible object slices.
+    # @param option [String] the new linker option
+    # @param options [Hash]
+    # @option options [Boolean] :strict (true) if true, fail if one slice fails.
+    # @option options [Array<Symbol>, Symbol, nil] :arch architectures to modify
+    # @return [void]
+    def add_linker_option(option, options = {})
+      archs = Array(options[:arch]).map(&:to_sym)
+      each_macho(options) do |macho|
+        next unless archs.empty? || archs.include?(macho.cputype)
+
+        macho.add_linker_option(option)
+      end
+
+      repopulate_modified_machos
+    end
+
     # Delete the given runtime path from the file's Mach-Os.
     # @param path [String] the runtime path to delete
     # @param options [Hash]
@@ -454,6 +471,11 @@ module MachO
 
       @raw_data = header_data + slices
       populate_fields
+    end
+
+    def repopulate_modified_machos
+      resized = fat_archs.zip(machos).any? { |arch, macho| arch.size != macho.serialize.bytesize }
+      resized ? repopulate_resized_raw_machos : repopulate_raw_machos
     end
 
     # Yield each Mach-O object in the file, rescuing and accumulating errors.
