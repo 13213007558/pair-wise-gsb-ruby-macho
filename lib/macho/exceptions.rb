@@ -9,6 +9,10 @@ module MachO
   class ModificationError < MachOError
   end
 
+  # Raised when a Mach-O bind operation cannot be rewritten safely.
+  class BindRewriteError < ModificationError
+  end
+
   # Raised when codesigning fails. Certain environments
   # may want to rescue this to treat it as non-fatal.
   class CodeSigningError < MachOError

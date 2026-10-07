@@ -298,6 +298,30 @@ module MachO
       nil
     end
 
+    # Rewrites one classic bind operation in every architecture.
+    # @return [void]
+    # @see MachOFile#bind!
+    def bind!(*args, **options)
+      each_macho(options) { |macho| macho.bind!(*args) }
+      repopulate_resized_raw_machos
+    end
+
+    # Rewrites one weak bind operation in every architecture.
+    # @return [void]
+    # @see MachOFile#weak_bind!
+    def weak_bind!(*args, **options)
+      each_macho(options) { |macho| macho.weak_bind!(*args) }
+      repopulate_resized_raw_machos
+    end
+
+    # Rewrites one lazy bind operation in every architecture.
+    # @return [void]
+    # @see MachOFile#lazy_bind!
+    def lazy_bind!(*args, **options)
+      each_macho(options) { |macho| macho.lazy_bind!(*args) }
+      repopulate_resized_raw_machos
+    end
+
     # Extract a Mach-O with the given CPU type from the file.
     # @example
     #  file.extract(:i386) # => MachO::MachOFile

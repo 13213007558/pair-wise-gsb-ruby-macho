@@ -445,6 +445,41 @@ module MachO
       CodeSigning::AdhocSigner.new(self, identifier || CodeSigning.identifier(self, filename)).sign!
     end
 
+    # Rewrites one classic bind operation selected by its source dylib ordinal
+    # and symbol.
+    # @param source_ordinal [Integer] the source dylib ordinal
+    # @param source_symbol [String] the source symbol
+    # @param target_ordinal [Integer] the target dylib ordinal
+    # @param target_symbol [String] the target symbol
+    # @param addend [Integer] the replacement addend
+    # @return [void]
+    def bind!(source_ordinal, source_symbol, target_ordinal, target_symbol, addend = 0)
+      BindRewriter.rewrite!(self, :bind, source_ordinal, source_symbol,
+                            target_ordinal, target_symbol, addend)
+    end
+
+    # Rewrites one weak bind operation selected by symbol.
+    # @param source_symbol [String] the source symbol
+    # @param target_symbol [String] the target symbol
+    # @param addend [Integer] the replacement addend
+    # @return [void]
+    def weak_bind!(source_symbol, target_symbol, addend = 0)
+      BindRewriter.rewrite!(self, :weak_bind, 0, source_symbol,
+                            0, target_symbol, addend)
+    end
+
+    # Rewrites one lazy bind operation selected by its source dylib ordinal and symbol.
+    # @param source_ordinal [Integer] the source dylib ordinal
+    # @param source_symbol [String] the source symbol
+    # @param target_ordinal [Integer] the target dylib ordinal
+    # @param target_symbol [String] the target symbol
+    # @param addend [Integer] the replacement addend
+    # @return [void]
+    def lazy_bind!(source_ordinal, source_symbol, target_ordinal, target_symbol, addend = 0)
+      BindRewriter.rewrite!(self, :lazy_bind, source_ordinal, source_symbol,
+                            target_ordinal, target_symbol, addend)
+    end
+
     # Write all Mach-O data to the given filename.
     # @param filename [String] the file to write to
     # @return [void]
