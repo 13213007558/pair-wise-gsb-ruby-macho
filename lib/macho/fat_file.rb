@@ -288,6 +288,42 @@ module MachO
       repopulate_raw_machos
     end
 
+    # Rewrites matching classic bind entries in every Mach-O slice.
+    # @see MachOFile#bind
+    def bind(source_ordinal, symbol, target_ordinal:, target_symbol: nil, addend: 0, **options)
+      each_macho(options) do |macho|
+        macho.bind(source_ordinal, symbol,
+                   :target_ordinal => target_ordinal,
+                   :target_symbol => target_symbol,
+                   :addend => addend)
+      end
+      repopulate_resized_raw_machos
+    end
+
+    # Rewrites matching weak bind entries in every Mach-O slice.
+    # @see MachOFile#weak_bind
+    def weak_bind(source_ordinal, symbol, target_ordinal:, target_symbol: nil, addend: 0, **options)
+      each_macho(options) do |macho|
+        macho.weak_bind(source_ordinal, symbol,
+                        :target_ordinal => target_ordinal,
+                        :target_symbol => target_symbol,
+                        :addend => addend)
+      end
+      repopulate_resized_raw_machos
+    end
+
+    # Rewrites matching lazy bind entries in every Mach-O slice.
+    # @see MachOFile#lazy_bind
+    def lazy_bind(source_ordinal, symbol, target_ordinal:, target_symbol: nil, addend: 0, **options)
+      each_macho(options) do |macho|
+        macho.lazy_bind(source_ordinal, symbol,
+                        :target_ordinal => target_ordinal,
+                        :target_symbol => target_symbol,
+                        :addend => addend)
+      end
+      repopulate_resized_raw_machos
+    end
+
     # Replaces every embedded signature with a pure-Ruby ad-hoc signature.
     # @param identifier [String, nil] the signing identifier
     # @return [void]

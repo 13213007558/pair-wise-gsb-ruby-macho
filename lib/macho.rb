@@ -5,11 +5,12 @@ require_relative "macho/structure"
 require_relative "macho/view"
 require_relative "macho/headers"
 require_relative "macho/code_signing"
+require_relative "macho/exceptions"
+require_relative "macho/bindings"
 require_relative "macho/load_commands"
 require_relative "macho/sections"
 require_relative "macho/macho_file"
 require_relative "macho/fat_file"
-require_relative "macho/exceptions"
 require_relative "macho/tools"
 
 # The primary namespace for ruby-macho.

@@ -30,6 +30,10 @@ module MachO
     end
   end
 
+  # Raised when a binding opcode stream cannot be parsed or rewritten.
+  class BindingError < RecoverableModificationError
+  end
+
   # Raised when a file is not a Mach-O.
   class NotAMachOError < MachOError
   end

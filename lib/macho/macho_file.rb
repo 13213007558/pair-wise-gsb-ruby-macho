@@ -438,6 +438,39 @@ module MachO
       rpath_cmds.reverse_each { |cmd| delete_command(cmd) }
     end
 
+    # Rewrites one or more matching entries in the classic bind opcode stream.
+    # @param source_ordinal [Integer] the original dylib ordinal
+    # @param symbol [String] the original imported symbol
+    # @param target_ordinal [Integer] the replacement dylib ordinal
+    # @param target_symbol [String, nil] the replacement symbol
+    # @param addend [Integer] the replacement addend
+    # @return [Integer] the number of rewritten bind entries
+    # @raise [BindingError] if the stream cannot be parsed or safely rewritten
+    def bind(source_ordinal, symbol, target_ordinal:, target_symbol: nil, addend: 0)
+      Bindings.rewrite!(self, :bind, source_ordinal, symbol,
+                       :target_ordinal => target_ordinal,
+                       :target_symbol => target_symbol,
+                       :addend => addend)
+    end
+
+    # Rewrites one or more matching entries in the weak bind opcode stream.
+    # @see #bind
+    def weak_bind(source_ordinal, symbol, target_ordinal:, target_symbol: nil, addend: 0)
+      Bindings.rewrite!(self, :weak_bind, source_ordinal, symbol,
+                       :target_ordinal => target_ordinal,
+                       :target_symbol => target_symbol,
+                       :addend => addend)
+    end
+
+    # Rewrites one matching lazy bind item and its x86_64 stub helper reference.
+    # @see #bind
+    def lazy_bind(source_ordinal, symbol, target_ordinal:, target_symbol: nil, addend: 0)
+      Bindings.rewrite!(self, :lazy_bind, source_ordinal, symbol,
+                       :target_ordinal => target_ordinal,
+                       :target_symbol => target_symbol,
+                       :addend => addend)
+    end
+
     # Replaces the embedded signature with a pure-Ruby ad-hoc signature.
     # @param identifier [String, nil] the signing identifier
     # @return [void]
